@@ -20,6 +20,7 @@ class {
 		URL_ATTRIBUTE = REGEX.compile( "(?i)(\s(?:href|src|poster)\s*=\s*)(""|')(.*?)\2" )
 		SCHEME = REGEX.compile( "^[A-Za-z][A-Za-z0-9+.-]*:" )
 		LATIN = REGEX.compile( "(?i)^(ISO-8859-1|windows-1252|US-ASCII)$" )
+		ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 		UTC = createObject( "java", "java.time.ZoneOffset" ).UTC
 	}
 
@@ -125,6 +126,13 @@ class {
 		// Atom's relative URLs are relative to the document, RSS's by convention to the channel's link
 		var base = type.startsWith( "atom" ) && len( arguments.baseUrl ) ? arguments.baseUrl : ( isAbsolute( link ) ? link : arguments.baseUrl )
 		var image = synd.getImage() ?: synd.getIcon()
+		var imageUrl = isNull( image ) ? "" : trim( image.getUrl() ?: "" )
+		// a podcast's artwork; ROME leaves itunes: tags as foreign markup without its modules jar
+		for ( var element in synd.getForeignMarkup() ) {
+			if ( !len( imageUrl ) && element.getName() == "image" && element.getNamespaceURI() == static.ITUNES ) {
+				imageUrl = trim( element.getAttributeValue( "href" ) ?: "" )
+			}
+		}
 		var items = []
 		for ( var entry in synd.getEntries() ) {
 			items.append( itemOf( entry, type, base ) )
@@ -136,7 +144,7 @@ class {
 			description : trim( synd.getDescription() ?: "" ),
 			language    : trim( synd.getLanguage() ?: "" ),
 			updated     : utc( synd.getPublishedDate() ),
-			image       : isNull( image ) ? "" : resolveUrl( image.getUrl() ?: "", base ),
+			image       : resolveUrl( imageUrl, base ),
 			items       : items
 		}
 	}

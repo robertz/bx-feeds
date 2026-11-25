@@ -1,0 +1,35 @@
+/** The module as installed: its settings and the three BIFs. */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+
+		describe( "bxFeeds module", () => {
+
+			it( "registers its settings", () => {
+				var settings = getModuleInfo( "bxFeeds" ).settings
+				expect( settings.userAgent ).toInclude( "bx-feeds/" )
+				expect( settings.timeoutSeconds ).toBe( 20 )
+				expect( settings.maxBytes ).toBe( 10485760 )
+				expect( settings.maxRedirects ).toBe( 5 )
+			} )
+
+			it( "parses with parseFeed()", () => {
+				var feed = parseFeed( '<rss version="2.0"><channel><title>T</title><link>http://t.example/</link><item><title>One</title><guid>1</guid></item></channel></rss>' )
+				expect( feed.title ).toBe( "T" )
+				expect( feed.items[ 1 ].id ).toBe( "1" )
+			} )
+
+			it( "discovers with discoverFeeds()", () => {
+				var feeds = discoverFeeds( '<link rel="alternate" type="application/atom+xml" href="/atom.xml">', "https://t.example/blog/" )
+				expect( feeds ).toBe( [ { url: "https://t.example/atom.xml", type: "application/atom+xml", title: "" } ] )
+			} )
+
+			it( "refuses what fetchFeed() can't fetch", () => {
+				expect( () => fetchFeed( "file:///etc/hosts" ) ).toThrow( type = "Feeds.FetchError" )
+			} )
+
+		} )
+
+	}
+
+}

@@ -1,0 +1,355 @@
+/** Every feed format and the messes real feeds make, from the fixtures in tests/resources. */
+class extends="testbox.system.BaseSpec" {
+
+	function fixture( required string name ) {
+		return fileReadBinary( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+	}
+
+	function iso( moment ) {
+		return isNull( arguments.moment ) ? "null" : arguments.moment.toISOString()
+	}
+
+	function run() {
+
+		describe( "FeedParser", () => {
+
+			beforeEach( () => {
+				variables.parser = new bxModules.bxFeeds.models.FeedParser()
+			} )
+
+			describe( "formats", () => {
+
+				it( "reads RSS 2.0", () => {
+					var feed = parser.parse( fixture( "rss20.xml" ) )
+					expect( feed.type ).toBe( "rss_2.0" )
+					expect( feed.title ).toBe( "Example Blog" )
+					expect( feed.link ).toBe( "https://blog.example/" )
+					expect( feed.description ).toBe( "Notes on things" )
+					expect( feed.language ).toBe( "en-GB" )
+					expect( feed.image ).toBe( "https://blog.example/icon.png" )
+					expect( iso( feed.updated ) ).toBe( "2026-11-03T09:30:00Z" )
+					expect( feed.items.len() ).toBe( 2 )
+
+					var first = feed.items[ 1 ]
+					expect( first.id ).toBe( "tag:blog.example,2026:hello" )
+					expect( first.title ).toBe( "Hello, world" )
+					expect( first.link ).toBe( "https://blog.example/hello" )
+					expect( iso( first.published ) ).toBe( "2026-11-02T15:00:00Z" )
+					expect( isNull( first.updated ) ).toBeTrue()
+					expect( first.authors ).toBe( [ "Ada Lovelace" ] )
+					expect( first.categories ).toBe( [ "News", "BoxLang" ] )
+					expect( first.summary ).toBe( "A short hello." )
+					expect( first.contentHtml ).toInclude( "<em>full</em>" )
+					expect( first.enclosures ).toBeEmpty()
+				} )
+
+				it( "uses the description as the content when that's all there is", () => {
+					var second = parser.parse( fixture( "rss20.xml" ) ).items[ 2 ]
+					expect( second.contentHtml ).toBe( "<p>Just <b>this</b>.</p>" )
+					expect( second.summary ).toBe( "<p>Just <b>this</b>.</p>" )
+				} )
+
+				it( "reads RSS 0.91, DOCTYPE and HTML entities included", () => {
+					var feed = parser.parse( fixture( "rss091.xml" ) )
+					expect( feed.type ).toBe( "rss_0.91U" )
+					expect( feed.title ).toBe( "Old Times" )
+					expect( feed.description ).toBe( "News from 1999 #char( 169 )# Old Times" )
+					expect( feed.image ).toBe( "http://old.example/logo.gif" )
+					expect( feed.items.len() ).toBe( 2 )
+					expect( feed.items[ 1 ].title ).toBe( "First#char( 160 )#post" )
+					expect( feed.items[ 1 ].link ).toBe( "http://old.example/1999/first.html" )
+					expect( isNull( feed.items[ 1 ].published ) ).toBeTrue()
+				} )
+
+				it( "reads RSS 1.0 (RDF)", () => {
+					var feed = parser.parse( fixture( "rss10.rdf" ) )
+					expect( feed.type ).toBe( "rss_1.0" )
+					expect( feed.title ).toBe( "RDF Site" )
+					expect( feed.language ).toBe( "en" )
+					expect( iso( feed.updated ) ).toBe( "2026-11-03T12:00:00Z" )
+					var first = feed.items[ 1 ]
+					expect( first.id ).toBe( "https://rdf.example/story/1" )
+					expect( first.link ).toBe( "https://rdf.example/story/1?from=rss" )
+					expect( iso( first.published ) ).toBe( "2026-11-03T10:00:00Z" )
+					expect( first.authors ).toBe( [ "Sam" ] )
+					expect( first.contentHtml ).toBe( "Plain words with <b>markup</b> anyway." )
+					expect( iso( feed.items[ 2 ].published ) ).toBe( "2026-11-02T00:00:00Z" )
+				} )
+
+				it( "reads Atom 1.0", () => {
+					var feed = parser.parse( fixture( "atom10.xml" ), { baseUrl: "https://atom.example/blog/feed.xml" } )
+					expect( feed.type ).toBe( "atom_1.0" )
+					expect( feed.title ).toBe( "Atom Example" )
+					expect( feed.link ).toBe( "https://atom.example/blog/" )
+					expect( feed.description ).toBe( "A feed that follows the rules" )
+					expect( feed.image ).toBe( "https://atom.example/blog/images/logo.png" )
+					expect( iso( feed.updated ) ).toBe( "2026-11-03T18:30:02Z" )
+
+					var first = feed.items[ 1 ]
+					expect( first.id ).toBe( "urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a" )
+					expect( first.link ).toBe( "https://atom.example/blog/posts/robots.html" )
+					expect( iso( first.published ) ).toBe( "2026-11-01T07:00:00Z" )
+					expect( iso( first.updated ) ).toBe( "2026-11-03T18:30:02Z" )
+					expect( first.authors ).toBe( [ "John Doe", "Jane Roe" ] )
+					expect( first.categories ).toBe( [ "robots", "amok" ] )
+					expect( first.summary ).toBe( "Some text." )
+					expect( first.enclosures ).toBe( [ { url: "https://atom.example/blog/audio/robots.mp3", type: "audio/mpeg", length: 1337 } ] )
+				} )
+
+				it( "turns Atom's text content into HTML", () => {
+					var plain = parser.parse( fixture( "atom10.xml" ) ).items[ 2 ]
+					expect( plain.contentHtml ).toBe( "1 &lt; 2 &amp; that's plain<br>second line" )
+					expect( isNull( plain.published ) ).toBeTrue()
+					expect( iso( plain.updated ) ).toBe( "2026-10-30T12:00:00Z" )
+				} )
+
+				it( "reads a podcast's enclosures and artwork", () => {
+					var feed = parser.parse( fixture( "podcast.xml" ) )
+					expect( feed.image ).toBe( "https://show.example/art.jpg" )
+					expect( feed.items[ 1 ].id ).toBe( "show-ep-2" )
+					expect( feed.items[ 1 ].enclosures ).toBe( [
+						{ url: "https://cdn.show.example/ep2.mp3", type: "audio/mpeg", length: 34216300 },
+						{ url: "https://cdn.show.example/ep2.opus", type: "audio/opus", length: 20000000 }
+					] )
+					expect( feed.items[ 2 ].enclosures[ 1 ].url ).toBe( "https://show.example/audio/ep1.mp3" )
+				} )
+
+			} )
+
+			describe( "JSON Feed", () => {
+
+				it( "maps 1.1 to the same shape", () => {
+					var feed = parser.parse( fixture( "feed.json" ) )
+					expect( feed.type ).toBe( "json_1.1" )
+					expect( feed.title ).toBe( "JSON Example" )
+					expect( feed.link ).toBe( "https://json.example/" )
+					expect( feed.description ).toBe( "A JSON Feed" )
+					expect( feed.language ).toBe( "en-US" )
+					expect( feed.image ).toBe( "https://json.example/icon-512.png" )
+					expect( isNull( feed.updated ) ).toBeTrue()
+					expect( feed.keyArray().sort( "text" ) ).toBe( parser.parse( fixture( "rss20.xml" ) ).keyArray().sort( "text" ) )
+
+					var first = feed.items[ 1 ]
+					expect( first.keyArray().sort( "text" ) ).toBe( parser.parse( fixture( "rss20.xml" ) ).items[ 1 ].keyArray().sort( "text" ) )
+					expect( first.id ).toBe( "https://json.example/posts/2" )
+					expect( first.title ).toBe( "Second" )
+					expect( iso( first.published ) ).toBe( "2026-11-02T15:00:00Z" )
+					expect( iso( first.updated ) ).toBe( "2026-11-02T16:30:00Z" )
+					expect( first.authors ).toBe( [ "Guest Writer" ] )
+					expect( first.summary ).toBe( "Hello" )
+					expect( first.contentHtml ).toBe( '<p>Hello with <a href="https://json.example/tags/x">a tag</a></p>' )
+					expect( first.categories ).toBe( [ "one", "two" ] )
+					expect( first.enclosures ).toBe( [ { url: "https://json.example/audio/2.mp3", type: "audio/mpeg", length: 4096 } ] )
+				} )
+
+				it( "copes with numeric ids, text content, bad dates and the feed's authors", () => {
+					var second = parser.parse( fixture( "feed.json" ) ).items[ 2 ]
+					expect( second.id ).toBe( "1" )
+					expect( second.link ).toBe( "https://elsewhere.example/thing" )
+					expect( second.contentHtml ).toBe( "Plain &amp; simple<br>second line" )
+					expect( isNull( second.published ) ).toBeTrue()
+					expect( second.authors ).toBe( [ "Site Author" ] )
+				} )
+
+				it( "hashes an id for an item without one, and resolves its link", () => {
+					var third = parser.parse( fixture( "feed.json" ) ).items[ 3 ]
+					expect( third.link ).toBe( "https://json.example/posts/0" )
+					expect( third.id ).toBe( "sha256:" & lcase( hash( "posts/0" & char( 10 ) & "No id here", "SHA-256", "UTF-8" ) ) )
+				} )
+
+				it( "reads 1.0's single author", () => {
+					var feed = parser.parse( '{"version":"https://jsonfeed.org/version/1","title":"Old","author":{"name":"Solo"},"items":[{"id":"a","content_text":"x"}]}' )
+					expect( feed.type ).toBe( "json_1" )
+					expect( feed.items[ 1 ].authors ).toBe( [ "Solo" ] )
+				} )
+
+				it( "refuses JSON that isn't a feed", () => {
+					expect( () => parser.parse( '{"hello":"world"}' ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( '{"version":"https://jsonfeed.org/version/1.1","items":"none"}' ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( '{"version": broken' ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+			} )
+
+			describe( "item ids", () => {
+
+				it( "keeps the feed's own id as it is", () => {
+					var items = parser.parse( fixture( "rss20.xml" ) ).items
+					expect( items[ 1 ].id ).toBe( "tag:blog.example,2026:hello" )
+					expect( items[ 2 ].id ).toBe( "https://blog.example/second" )
+				} )
+
+				it( "hashes the link as written and the title when there's no guid", () => {
+					var items = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ).items
+					expect( items[ 1 ].id ).toBe( "sha256:" & lcase( hash( "/posts/one" & char( 10 ) & "No guid, relative link", "SHA-256", "UTF-8" ) ) )
+					// a blank <guid> is no guid
+					expect( items[ 5 ].id ).toBe( "sha256:" & lcase( hash( "/posts/three" & char( 10 ) & "Empty guid", "SHA-256", "UTF-8" ) ) )
+				} )
+
+				it( "falls back to the published time, then the content, when there's no title", () => {
+					var items = parser.parse( fixture( "messy.xml" ) ).items
+					expect( items[ 3 ].id ).toBe( "sha256:" & lcase( hash( "/posts/untitled" & char( 10 ) & "2026-11-01T00:00:00Z", "SHA-256", "UTF-8" ) ) )
+					expect( items[ 4 ].id ).toBe( "sha256:" & lcase( hash( char( 10 ) & "Nothing but words", "SHA-256", "UTF-8" ) ) )
+				} )
+
+				it( "gives the same ids whatever the base URL, and on every parse", () => {
+					var ids = ( feed ) => feed.items.map( ( item ) => item.id )
+					var plain = ids( parser.parse( fixture( "messy.xml" ) ) )
+					expect( ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ) ) ).toBe( plain )
+					expect( ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://mirror.example/" } ) ) ).toBe( plain )
+					expect( arrayLen( plain ) ).toBe( 5 )
+					expect( structCount( plain.reduce( ( seen, id ) => { seen[ id ] = true; return seen }, {} ) ) ).toBe( 5 )
+				} )
+
+			} )
+
+			describe( "relative URLs", () => {
+
+				it( "resolves feed, item and enclosure links against the base", () => {
+					var feed = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/blog/feed.xml" } )
+					expect( feed.link ).toBe( "https://messy.example/" )
+					expect( feed.items[ 1 ].link ).toBe( "https://messy.example/posts/one" )
+					expect( feed.items[ 1 ].enclosures[ 1 ].url ).toBe( "https://messy.example/media/one.mp3" )
+					expect( feed.items[ 1 ].enclosures[ 1 ].length ).toBe( 0 )
+				} )
+
+				it( "resolves href, src and poster in content against the item's link", () => {
+					var html = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/blog/feed.xml" } ).items[ 1 ].contentHtml
+					expect( html ).toInclude( '<a href="https://messy.example/posts/two">' )
+					expect( html ).toInclude( "<a href='https://cdn.messy.example/x.js'>" )
+					expect( html ).toInclude( '<video src="https://messy.example/v.mp4" poster="https://messy.example/p.jpg">' )
+				} )
+
+				it( "leaves absolute URLs, fragments, unparseable URLs and text alone", () => {
+					var html = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/blog/feed.xml" } ).items[ 1 ].contentHtml
+					expect( html ).toInclude( '<a href="mailto:me@messy.example">' )
+					expect( html ).toInclude( '<a href="##note">' )
+					expect( html ).toInclude( '<a href="has space.html">' )
+					expect( html ).toInclude( ' text href="not-a-tag"' )
+				} )
+
+				it( "resolves Atom against the feed's own URL", () => {
+					var feed = parser.parse( fixture( "atom10.xml" ), { baseUrl: "https://mirror.example/a/b/feed.xml" } )
+					expect( feed.items[ 1 ].link ).toBe( "https://mirror.example/a/b/posts/robots.html" )
+					expect( feed.items[ 1 ].contentHtml ).toBe( '<p>Robots, <a href="https://mirror.example/a/b/about.html">about</a>.</p>' )
+				} )
+
+				it( "returns links as written when nothing says where the feed came from", () => {
+					var feed = parser.parse( fixture( "messy.xml" ) )
+					expect( feed.link ).toBe( "/" )
+					expect( feed.items[ 1 ].link ).toBe( "/posts/one" )
+					expect( feed.items[ 1 ].contentHtml ).toInclude( '<a href="two">' )
+				} )
+
+			} )
+
+			describe( "dates", () => {
+
+				it( "returns UTC datetimes", () => {
+					var published = parser.parse( fixture( "rss20.xml" ) ).items[ 1 ].published
+					expect( isDate( published ) ).toBeTrue()
+					expect( published.getClass().getName() ).toBe( "ortus.boxlang.runtime.types.DateTime" )
+					expect( published.toISOString() ).toBe( "2026-11-02T15:00:00Z" )
+				} )
+
+				it( "returns null for a date it can't read, and never throws", () => {
+					var items = parser.parse( fixture( "messy.xml" ) ).items
+					expect( isNull( items[ 2 ].published ) ).toBeTrue()
+					expect( items[ 2 ].title ).toBe( "No guid, bad date" )
+					// an ISO date in an RSS pubDate is wrong, and read anyway
+					expect( iso( items[ 5 ].published ) ).toBe( "2026-11-01T05:00:00Z" )
+				} )
+
+			} )
+
+			describe( "content", () => {
+
+				it( "returns CDATA and escaped HTML alike, unsanitized", () => {
+					var items = parser.parse( fixture( "messy.xml" ) ).items
+					expect( items[ 1 ].contentHtml ).toInclude( "<p>See <a href=" )
+					expect( items[ 2 ].contentHtml ).toBe( "<p>Escaped &amp; fine</p>" )
+					var feed = parser.parse( '<rss version="2.0"><channel><title>T</title><item><guid>1</guid><description><![CDATA[<script>alert(1)</script><p onclick="x()">hi</p>]]></description></item></channel></rss>' )
+					expect( feed.items[ 1 ].contentHtml ).toBe( '<script>alert(1)</script><p onclick="x()">hi</p>' )
+				} )
+
+			} )
+
+			describe( "input", () => {
+
+				it( "takes a string, bytes or a file path", () => {
+					var path = getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/rss20.xml"
+					expect( parser.parse( path ).title ).toBe( "Example Blog" )
+					expect( parser.parse( fileRead( path ) ).title ).toBe( "Example Blog" )
+					expect( parser.parse( fileReadBinary( path ) ).title ).toBe( "Example Blog" )
+				} )
+
+				it( "reads past whitespace and a byte order mark before the XML declaration", () => {
+					expect( parser.parse( fixture( "messy.xml" ) ).title ).toBe( "Messy" )
+					expect( parser.parse( char( 65279 ) & '<?xml version="1.0"?><rss version="2.0"><channel><title>BOM</title></channel></rss>' ).title ).toBe( "BOM" )
+				} )
+
+			} )
+
+			describe( "charsets", () => {
+
+				it( "honors the XML declaration", () => {
+					expect( parser.parse( fixture( "latin1.xml" ) ).title ).toBe( "Caf#char( 233 )# - d#char( 233 )#j#char( 224 )# vu" )
+				} )
+
+				it( "honors a byte order mark", () => {
+					expect( parser.parse( fixture( "utf16-bom.xml" ) ).items[ 1 ].title ).toBe( "Se#char( 241 )#or #char( 8220 )#quotes#char( 8221 )#" )
+				} )
+
+				it( "honors the HTTP header when the document doesn't say", () => {
+					var bytes = '<rss version="2.0"><channel><title>Caf#char( 233 )#</title></channel></rss>'.getBytes( "ISO-8859-1" )
+					expect( parser.parse( bytes, { contentType: "text/xml; charset=ISO-8859-1" } ).title ).toBe( "Caf#char( 233 )#" )
+				} )
+
+				it( "reads bytes declared UTF-8 that are really windows-1252", () => {
+					var feed = parser.parse( fixture( "declared-utf8-is-windows1252.xml" ) )
+					expect( feed.title ).toBe( "Caf#char( 233 )# #char( 8212 )# d#char( 233 )#j#char( 224 )# vu" )
+					expect( feed.items[ 1 ].title ).toBe( "Se#char( 241 )#or #char( 8220 )#quotes#char( 8221 )#" )
+				} )
+
+				it( "reads bytes declared Latin-1 that are really UTF-8", () => {
+					expect( parser.parse( fixture( "declared-latin1-is-utf8.xml" ) ).title ).toBe( "Caf#char( 233 )# #char( 8212 )# d#char( 233 )#j#char( 224 )# vu" )
+				} )
+
+			} )
+
+			describe( "what it can't read", () => {
+
+				it( "throws Feeds.ParseError for garbage bytes", () => {
+					expect( () => parser.parse( fixture( "garbage.bin" ) ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+				it( "throws Feeds.ParseError for HTML, broken XML, XML that isn't a feed, and nothing", () => {
+					expect( () => parser.parse( "<!doctype html><html><body><p>Not found</p></body></html>" ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( '<rss version="2.0"><channel><title>Cut off' ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( "<svg xmlns='http://www.w3.org/2000/svg'/>" ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( "" ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( createObject( "java", "java.io.ByteArrayOutputStream" ).init().toByteArray() ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+				it( "throws Feeds.ParseError for a path that isn't a file, and for input that isn't text or bytes", () => {
+					expect( () => parser.parse( "no/such/feed.xml" ) ).toThrow( type = "Feeds.ParseError" )
+					expect( () => parser.parse( { not: "a feed" } ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+				it( "says what was wrong without a stack trace in the message", () => {
+					try {
+						parser.parse( fixture( "garbage.bin" ) )
+						fail( "should have thrown" )
+					} catch ( "Feeds.ParseError" e ) {
+						expect( e.message ).toBe( "That isn't a readable RSS or Atom feed" )
+						expect( e.detail ).toInclude( "Invalid XML" )
+					}
+				} )
+
+			} )
+
+		} )
+
+	}
+
+}

@@ -1,0 +1,48 @@
+/** <link rel="alternate"> autodiscovery. */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+
+		describe( "FeedDiscovery", () => {
+
+			beforeEach( () => {
+				variables.discovery = new bxModules.bxFeeds.models.FeedDiscovery()
+				variables.page = fileRead( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/page.html" )
+			} )
+
+			it( "finds the page's feeds as absolute URLs, in page order", () => {
+				var feeds = discovery.discover( page, "https://site.example/blog/post" )
+				expect( feeds ).toBe( [
+					{ url: "https://site.example/feed.xml", type: "application/rss+xml", title: "Posts & notes" },
+					{ url: "https://site.example/blog/atom.xml?a=1&b=2", type: "application/atom+xml", title: "" },
+					{ url: "https://site.example/blog/feed.json", type: "application/feed+json", title: "" }
+				] )
+			} )
+
+			it( "skips stylesheets, other alternates, commented-out tags and plain anchors", () => {
+				var urls = discovery.discover( page, "https://site.example/" ).map( ( feed ) => feed.url )
+				expect( urls.len() ).toBe( 3 )
+				expect( urls.toList() ).notToInclude( "commented-out" )
+				expect( urls.toList() ).notToInclude( "/de/" )
+				expect( urls.toList() ).notToInclude( "not-a-feed" )
+			} )
+
+			it( "honors <base href>", () => {
+				var feeds = discovery.discover( '<base href="https://cdn.example/root/"><link rel="alternate" type="application/rss+xml" href="rss.xml">', "https://site.example/" )
+				expect( feeds[ 1 ].url ).toBe( "https://cdn.example/root/rss.xml" )
+			} )
+
+			it( "returns hrefs as written when there's no base", () => {
+				expect( discovery.discover( '<link rel="alternate" type="application/rss+xml" href="/rss.xml">' )[ 1 ].url ).toBe( "/rss.xml" )
+			} )
+
+			it( "returns nothing for a page without feeds", () => {
+				expect( discovery.discover( "<html><body>No head at all</body></html>", "https://site.example/" ) ).toBeEmpty()
+				expect( discovery.discover( "" ) ).toBeEmpty()
+			} )
+
+		} )
+
+	}
+
+}

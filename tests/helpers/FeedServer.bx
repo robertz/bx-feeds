@@ -1,0 +1,90 @@
+/**
+ * A local HTTP server on a random free port for the fetch specs. A route is a
+ * function given the request's headers and returning
+ * { status, headers = {}, body = "" (string or bytes), delayMs = 0, chunked = false, dripMs = 0 }.
+ *
+ *   feeds = new tests.helpers.FeedServer()
+ *   feeds.on( "/feed", ( headers ) => { return { status: 200, body: xml } } )
+ *   fetchFeed( feeds.at( "/feed" ) ); feeds.hits( "/feed" ); feeds.stop()
+ */
+class {
+
+	function init() {
+		variables.routes = {}
+		variables.seen = createObject( "java", "java.util.concurrent.CopyOnWriteArrayList" ).init()
+		variables.pool = createObject( "java", "java.util.concurrent.Executors" ).newCachedThreadPool()
+		variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" )
+			.create( createObject( "java", "java.net.InetSocketAddress" ).init( "127.0.0.1", 0 ), 0 )
+		variables.httpServer.setExecutor( variables.pool )
+		var routes = variables.routes
+		var seen = variables.seen
+		variables.httpServer.createContext( "/", ( exchange ) => {
+			try {
+				var path = exchange.getRequestURI().getPath()
+				var headers = {}
+				for ( var name in exchange.getRequestHeaders().keySet() ) {
+					headers[ name ] = exchange.getRequestHeaders().getFirst( name )
+				}
+				seen.add( { path: path, headers: headers } )
+				var answer = routes.keyExists( path ) ? routes[ path ]( headers ) : { status: 404 }
+				if ( ( answer.delayMs ?: 0 ) > 0 ) {
+					sleep( answer.delayMs )
+				}
+				for ( var name in answer.headers ?: {} ) {
+					exchange.getResponseHeaders().set( name, answer.headers[ name ] )
+				}
+				var body = answer.body ?: ""
+				if ( !isBinary( body ) ) {
+					body = toString( body ).getBytes( "UTF-8" )
+				}
+				var size = arrayLen( body )
+				if ( size == 0 ) {
+					exchange.sendResponseHeaders( answer.status, javacast( "long", -1 ) )
+				} else if ( ( answer.dripMs ?: 0 ) > 0 ) {
+					exchange.sendResponseHeaders( answer.status, javacast( "long", 0 ) )
+					for ( var i = 1; i <= size; i++ ) {
+						exchange.getResponseBody().write( body, i - 1, 1 )
+						exchange.getResponseBody().flush()
+						sleep( answer.dripMs )
+					}
+				} else {
+					exchange.sendResponseHeaders( answer.status, javacast( "long", ( answer.chunked ?: false ) ? 0 : size ) )
+					exchange.getResponseBody().write( body )
+				}
+			} catch ( any e ) {
+				// the client hung up, as the timeout and oversize specs make it
+			} finally {
+				exchange.close()
+			}
+		} )
+		variables.httpServer.start()
+		return this
+	}
+
+	function on( required string path, required function route ) {
+		variables.routes[ arguments.path ] = arguments.route
+		return this
+	}
+
+	string function at( string path = "/" ) {
+		return "http://127.0.0.1:#variables.httpServer.getAddress().getPort()##arguments.path#"
+	}
+
+	/** The requests received for a path, oldest first: [ { path, headers } ]. Every request when no path is given. */
+	array function hits( string path = "" ) {
+		var wanted = arguments.path
+		var all = []
+		for ( var hit in variables.seen ) {
+			if ( !len( wanted ) || hit.path == wanted ) {
+				all.append( hit )
+			}
+		}
+		return all
+	}
+
+	void function stop() {
+		variables.httpServer.stop( 0 )
+		variables.pool.shutdownNow()
+	}
+
+}

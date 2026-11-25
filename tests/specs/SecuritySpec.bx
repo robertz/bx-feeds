@@ -1,0 +1,84 @@
+/**
+ * XML attacks: external entities (XXE), external DTDs and entity expansion.
+ * A local server and a file stand in for what an attacker would aim at;
+ * neither may be read.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function payload( required string name ) {
+		var text = fileRead( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+		return text.replace( "{{FILE}}", variables.secretUri, "all" ).replace( "{{HTTP}}", variables.target.at( "" ), "all" )
+	}
+
+	function beforeAll() {
+		variables.parser = new bxModules.bxFeeds.models.FeedParser()
+		variables.target = new tests.helpers.FeedServer()
+		variables.secretFile = getTempFile( getTempDirectory(), "bxfeeds" )
+		fileWrite( variables.secretFile, "TOP-SECRET-FILE-CONTENT" )
+		variables.secretUri = createObject( "java", "java.io.File" ).init( variables.secretFile ).toURI().toString()
+	}
+
+	function afterAll() {
+		variables.target.stop()
+		fileDelete( variables.secretFile )
+	}
+
+	function run() {
+
+		describe( "XML security", () => {
+
+			it( "has a working canary: the secret file and the server can be read", () => {
+				expect( fileRead( secretFile ) ).toBe( "TOP-SECRET-FILE-CONTENT" )
+				expect( payload( "xxe.xml" ) ).toInclude( secretUri )
+				expect( payload( "xxe.xml" ) ).toInclude( target.at( "/entity" ) )
+				var connection = createObject( "java", "java.net.URI" ).init( target.at( "/canary" ) ).toURL().openConnection()
+				expect( connection.getResponseCode() ).toBe( 404 )
+				expect( target.hits( "/canary" ).len() ).toBe( 1 )
+			} )
+
+			it( "doesn't read a file or call a server named by an external entity", () => {
+				var before = target.hits().len()
+				var leaked = ""
+				try {
+					leaked = jsonSerialize( parser.parse( payload( "xxe.xml" ) ) )
+				} catch ( "Feeds.ParseError" e ) {
+					leaked = e.message & e.detail
+				}
+				expect( leaked ).notToInclude( "TOP-SECRET" )
+				expect( target.hits().len() ).toBe( before )
+			} )
+
+			it( "refuses a feed that uses entities from its own DOCTYPE", () => {
+				expect( () => parser.parse( payload( "xxe.xml" ) ) ).toThrow( type = "Feeds.ParseError" )
+			} )
+
+			it( "doesn't fetch an external DTD, and still reads the feed", () => {
+				var before = target.hits().len()
+				var feed = parser.parse( payload( "external-dtd.xml" ) )
+				expect( feed.title ).toBe( "External DTD" )
+				expect( feed.items.len() ).toBe( 1 )
+				expect( target.hits().len() ).toBe( before )
+			} )
+
+			it( "doesn't expand a billion laughs", () => {
+				var started = getTickCount()
+				expect( () => parser.parse( payload( "billion-laughs.xml" ) ) ).toThrow( type = "Feeds.ParseError" )
+				expect( getTickCount() - started ).toBeLT( 5000 )
+			} )
+
+			it( "is just as safe when the attack comes as bytes or sits behind comments", () => {
+				var before = target.hits().len()
+				expect( () => parser.parse( payload( "xxe.xml" ).getBytes( "UTF-8" ) ) ).toThrow( type = "Feeds.ParseError" )
+				var hidden = payload( "xxe.xml" ).replace( "<!DOCTYPE", "<!-- <!DOCTYPE a> --><?pi x?><!DOCTYPE" )
+				expect( () => parser.parse( hidden ) ).toThrow( type = "Feeds.ParseError" )
+				// a DOCTYPE the module's own cut misses is refused by the XML parser itself
+				var inside = '<rss version="2.0"><!DOCTYPE rss [<!ENTITY xxe SYSTEM "#secretUri#">]><channel><title>&xxe;</title></channel></rss>'
+				expect( () => parser.parse( inside ) ).toThrow( type = "Feeds.ParseError" )
+				expect( target.hits().len() ).toBe( before )
+			} )
+
+		} )
+
+	}
+
+}
