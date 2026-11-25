@@ -1,0 +1,285 @@
+/** fetchFeed() against a local server on a random port: no spec touches the network. */
+class extends="testbox.system.BaseSpec" {
+
+	function fixture( required string name ) {
+		return fileReadBinary( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+	}
+
+	function gzipped( required bytes ) {
+		var out = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+		var gzip = createObject( "java", "java.util.zip.GZIPOutputStream" ).init( out )
+		gzip.write( arguments.bytes )
+		gzip.close()
+		return out.toByteArray()
+	}
+
+	function beforeAll() {
+		variables.fetcher = new bxModules.bxFeeds.models.FeedFetcher()
+		variables.feeds = new tests.helpers.FeedServer()
+		var rss = fixture( "rss20.xml" )
+		var messy = fixture( "messy.xml" )
+		var feeds = variables.feeds
+		var big = repeatString( "<!-- padding padding padding padding -->", 5000 )
+
+		feeds.on( "/feed.xml", ( headers ) => {
+			var unchanged = ( headers[ "If-None-Match" ] ?: "" ) == '"v1"' || ( headers[ "If-Modified-Since" ] ?: "" ) == "Tue, 03 Nov 2026 09:30:00 GMT"
+			return {
+				status  : unchanged ? 304 : 200,
+				headers : { "ETag": '"v1"', "Last-Modified": "Tue, 03 Nov 2026 09:30:00 GMT", "Content-Type": "application/rss+xml; charset=utf-8" },
+				body    : unchanged ? "" : rss
+			}
+		} )
+		feeds.on( "/bare-304", ( headers ) => { return { status: 304 } } )
+		feeds.on( "/blog/messy.xml", ( headers ) => { return { status: 200, body: messy } } )
+		feeds.on( "/moved", ( headers ) => { return { status: 301, headers: { "Location": feeds.at( "/feed.xml" ) } } } )
+		feeds.on( "/moved-308", ( headers ) => { return { status: 308, headers: { "Location": "/feed.xml" } } } )
+		feeds.on( "/moved-twice", ( headers ) => { return { status: 301, headers: { "Location": "/moved" } } } )
+		feeds.on( "/temporary", ( headers ) => { return { status: 302, headers: { "Location": "/feed.xml" } } } )
+		feeds.on( "/temporary-307", ( headers ) => { return { status: 307, headers: { "Location": "/feed.xml" } } } )
+		feeds.on( "/moved-then-temporary", ( headers ) => { return { status: 301, headers: { "Location": "/temporary" } } } )
+		feeds.on( "/temporary-then-moved", ( headers ) => { return { status: 302, headers: { "Location": "/moved" } } } )
+		feeds.on( "/loop", ( headers ) => { return { status: 302, headers: { "Location": "/loop" } } } )
+		feeds.on( "/to-file", ( headers ) => { return { status: 302, headers: { "Location": "file:///etc/hosts" } } } )
+		feeds.on( "/big", ( headers ) => { return { status: 200, body: "<rss version=""2.0""><channel><title>Big</title>#big#</channel></rss>" } } )
+		feeds.on( "/big-chunked", ( headers ) => { return { status: 200, chunked: true, body: "<rss version=""2.0""><channel><title>Big</title>#big#</channel></rss>" } } )
+		feeds.on( "/gzip", ( headers ) => { return { status: 200, headers: { "Content-Encoding": "gzip" }, body: gzipped( rss ) } } )
+		feeds.on( "/gzip-bomb", ( headers ) => { return { status: 200, headers: { "Content-Encoding": "gzip" }, body: gzipped( "<rss version=""2.0""><channel><title>Bomb</title>#big#</channel></rss>".getBytes( "UTF-8" ) ) } } )
+		feeds.on( "/slow", ( headers ) => { return { status: 200, delayMs: 3000, body: rss } } )
+		feeds.on( "/drip", ( headers ) => { return { status: 200, dripMs: 100, body: rss } } )
+		feeds.on( "/gone", ( headers ) => { return { status: 410, body: "Gone" } } )
+		feeds.on( "/error", ( headers ) => { return { status: 500, body: "<html>Oops</html>" } } )
+		feeds.on( "/html", ( headers ) => { return { status: 200, headers: { "Content-Type": "text/html" }, body: "<!doctype html><html><body>Sign in</body></html>" } } )
+		feeds.on( "/latin1", ( headers ) => {
+			return { status: 200, headers: { "Content-Type": "text/xml; charset=ISO-8859-1" }, body: "<rss version=""2.0""><channel><title>Caf#char( 233 )#</title></channel></rss>".getBytes( "ISO-8859-1" ) }
+		} )
+	}
+
+	function afterAll() {
+		variables.feeds.stop()
+	}
+
+	function run() {
+
+		describe( "FeedFetcher", () => {
+
+			describe( "a plain fetch", () => {
+
+				it( "returns the parsed feed with its validators", () => {
+					var result = fetcher.fetch( feeds.at( "/feed.xml" ) )
+					expect( result.status ).toBe( 200 )
+					expect( result.notModified ).toBeFalse()
+					expect( result.etag ).toBe( '"v1"' )
+					expect( result.lastModified ).toBe( "Tue, 03 Nov 2026 09:30:00 GMT" )
+					expect( result.finalUrl ).toBe( feeds.at( "/feed.xml" ) )
+					expect( result.permanentUrl ).toBe( "" )
+					expect( result.feed.title ).toBe( "Example Blog" )
+					expect( result.feed.items.len() ).toBe( 2 )
+				} )
+
+				it( "says who's asking and what it takes", () => {
+					fetcher.fetch( feeds.at( "/feed.xml" ) )
+					var sent = feeds.hits( "/feed.xml" ).last().headers
+					expect( sent[ "User-Agent" ] ).toBe( getModuleInfo( "bxFeeds" ).settings.userAgent )
+					expect( sent[ "Accept" ] ).toInclude( "application/atom+xml" )
+					expect( sent[ "Accept-Encoding" ] ).toBe( "gzip" )
+					expect( sent.keyExists( "If-None-Match" ) ).toBeFalse()
+					expect( sent.keyExists( "If-Modified-Since" ) ).toBeFalse()
+				} )
+
+				it( "sends the User-Agent it's given, per call or per fetcher", () => {
+					fetcher.fetch( feeds.at( "/feed.xml" ), { userAgent: "Feedhouse/1.0 (+https://feedhouse.app)" } )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( "Feedhouse/1.0 (+https://feedhouse.app)" )
+					new bxModules.bxFeeds.models.FeedFetcher( { userAgent: "Mine/2" } ).fetch( feeds.at( "/feed.xml" ) )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( "Mine/2" )
+				} )
+
+				it( "resolves relative links against where the feed was fetched", () => {
+					var feed = fetcher.fetch( feeds.at( "/blog/messy.xml" ) ).feed
+					expect( feed.link ).toBe( feeds.at( "/" ) )
+					expect( feed.items[ 1 ].link ).toBe( feeds.at( "/posts/one" ) )
+				} )
+
+				it( "reads the charset from the Content-Type header", () => {
+					expect( fetcher.fetch( feeds.at( "/latin1" ) ).feed.title ).toBe( "Caf#char( 233 )#" )
+				} )
+
+				it( "undoes gzip", () => {
+					expect( fetcher.fetch( feeds.at( "/gzip" ) ).feed.title ).toBe( "Example Blog" )
+				} )
+
+			} )
+
+			describe( "a conditional GET", () => {
+
+				it( "sends the ETag and gets a 304 with no feed", () => {
+					var result = fetcher.fetch( feeds.at( "/feed.xml" ), { etag: '"v1"' } )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "If-None-Match" ] ).toBe( '"v1"' )
+					expect( result.status ).toBe( 304 )
+					expect( result.notModified ).toBeTrue()
+					expect( isNull( result.feed ) ).toBeTrue()
+					expect( result.etag ).toBe( '"v1"' )
+				} )
+
+				it( "sends Last-Modified as If-Modified-Since", () => {
+					var result = fetcher.fetch( feeds.at( "/feed.xml" ), { lastModified: "Tue, 03 Nov 2026 09:30:00 GMT" } )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "If-Modified-Since" ] ).toBe( "Tue, 03 Nov 2026 09:30:00 GMT" )
+					expect( result.notModified ).toBeTrue()
+				} )
+
+				it( "fetches again when the validators are stale", () => {
+					var result = fetcher.fetch( feeds.at( "/feed.xml" ), { etag: '"v0"', lastModified: "Mon, 02 Nov 2026 00:00:00 GMT" } )
+					expect( result.status ).toBe( 200 )
+					expect( result.etag ).toBe( '"v1"' )
+					expect( result.feed.title ).toBe( "Example Blog" )
+				} )
+
+				it( "hands back the validators it was given when a 304 repeats none", () => {
+					var result = fetcher.fetch( feeds.at( "/bare-304" ), { etag: '"kept"', lastModified: "Sun, 01 Nov 2026 00:00:00 GMT" } )
+					expect( result.notModified ).toBeTrue()
+					expect( result.etag ).toBe( '"kept"' )
+					expect( result.lastModified ).toBe( "Sun, 01 Nov 2026 00:00:00 GMT" )
+				} )
+
+				it( "round-trips: what one fetch returns makes the next a 304", () => {
+					var first = fetcher.fetch( feeds.at( "/feed.xml" ) )
+					var second = fetcher.fetch( feeds.at( "/feed.xml" ), { etag: first.etag, lastModified: first.lastModified } )
+					expect( second.notModified ).toBeTrue()
+				} )
+
+			} )
+
+			describe( "redirects", () => {
+
+				it( "follows a 301 and reports where the feed moved", () => {
+					var result = fetcher.fetch( feeds.at( "/moved" ) )
+					expect( result.status ).toBe( 200 )
+					expect( result.finalUrl ).toBe( feeds.at( "/feed.xml" ) )
+					expect( result.permanentUrl ).toBe( feeds.at( "/feed.xml" ) )
+					expect( result.feed.title ).toBe( "Example Blog" )
+				} )
+
+				it( "treats a 308 the same, and resolves a relative Location", () => {
+					var result = fetcher.fetch( feeds.at( "/moved-308" ) )
+					expect( result.permanentUrl ).toBe( feeds.at( "/feed.xml" ) )
+				} )
+
+				it( "follows a 302 or 307 without calling it permanent", () => {
+					for ( var path in [ "/temporary", "/temporary-307" ] ) {
+						var result = fetcher.fetch( feeds.at( path ) )
+						expect( result.status ).toBe( 200 )
+						expect( result.finalUrl ).toBe( feeds.at( "/feed.xml" ) )
+						expect( result.permanentUrl ).toBe( "" )
+					}
+				} )
+
+				it( "reports the end of a chain of permanent redirects", () => {
+					expect( fetcher.fetch( feeds.at( "/moved-twice" ) ).permanentUrl ).toBe( feeds.at( "/feed.xml" ) )
+				} )
+
+				it( "reports only as far as the redirects stay permanent", () => {
+					var result = fetcher.fetch( feeds.at( "/moved-then-temporary" ) )
+					expect( result.finalUrl ).toBe( feeds.at( "/feed.xml" ) )
+					expect( result.permanentUrl ).toBe( feeds.at( "/temporary" ) )
+					expect( fetcher.fetch( feeds.at( "/temporary-then-moved" ) ).permanentUrl ).toBe( "" )
+				} )
+
+				it( "keeps the validators across a redirect", () => {
+					var result = fetcher.fetch( feeds.at( "/moved" ), { etag: '"v1"' } )
+					expect( result.notModified ).toBeTrue()
+					expect( result.permanentUrl ).toBe( feeds.at( "/feed.xml" ) )
+				} )
+
+				it( "gives up on a redirect loop", () => {
+					var before = feeds.hits( "/loop" ).len()
+					expect( () => fetcher.fetch( feeds.at( "/loop" ) ) ).toThrow( type = "Feeds.FetchError.TooManyRedirects" )
+					// the first request and maxRedirects more
+					expect( feeds.hits( "/loop" ).len() - before ).toBe( 6 )
+					expect( () => fetcher.fetch( feeds.at( "/moved-twice" ), { maxRedirects: 1 } ) ).toThrow( type = "Feeds.FetchError.TooManyRedirects" )
+				} )
+
+				it( "won't follow a redirect off http(s)", () => {
+					expect( () => fetcher.fetch( feeds.at( "/to-file" ) ) ).toThrow( type = "Feeds.FetchError" )
+				} )
+
+			} )
+
+			describe( "limits", () => {
+
+				it( "refuses a response over maxBytes by its Content-Length", () => {
+					expect( () => fetcher.fetch( feeds.at( "/big" ), { maxBytes: 50000 } ) ).toThrow( type = "Feeds.FetchError.TooLarge" )
+				} )
+
+				it( "stops reading a response of unknown length at maxBytes", () => {
+					expect( () => fetcher.fetch( feeds.at( "/big-chunked" ), { maxBytes: 50000 } ) ).toThrow( type = "Feeds.FetchError.TooLarge" )
+				} )
+
+				it( "counts the bytes after gzip is undone", () => {
+					expect( () => fetcher.fetch( feeds.at( "/gzip-bomb" ), { maxBytes: 50000 } ) ).toThrow( type = "Feeds.FetchError.TooLarge" )
+				} )
+
+				it( "takes a response under maxBytes", () => {
+					expect( fetcher.fetch( feeds.at( "/big" ), { maxBytes: 500000 } ).feed.title ).toBe( "Big" )
+				} )
+
+				it( "times out on a server that's slow to answer", () => {
+					var started = getTickCount()
+					expect( () => fetcher.fetch( feeds.at( "/slow" ), { timeoutSeconds: 1 } ) ).toThrow( type = "Feeds.FetchError.Timeout" )
+					expect( getTickCount() - started ).toBeLT( 2500 )
+				} )
+
+				it( "times out on a body that trickles in, however regularly", () => {
+					var started = getTickCount()
+					expect( () => fetcher.fetch( feeds.at( "/drip" ), { timeoutSeconds: 1 } ) ).toThrow( type = "Feeds.FetchError.Timeout" )
+					expect( getTickCount() - started ).toBeLT( 2500 )
+				} )
+
+				it( "can be caught as Feeds.FetchError whatever the limit", () => {
+					var caught = []
+					for ( var call in [ { path: "/big", options: { maxBytes: 50000 } }, { path: "/slow", options: { timeoutSeconds: 1 } }, { path: "/loop", options: {} } ] ) {
+						try {
+							fetcher.fetch( feeds.at( call.path ), call.options )
+						} catch ( "Feeds.FetchError" e ) {
+							caught.append( e.type )
+						}
+					}
+					expect( caught ).toBe( [ "Feeds.FetchError.TooLarge", "Feeds.FetchError.Timeout", "Feeds.FetchError.TooManyRedirects" ] )
+				} )
+
+			} )
+
+			describe( "failures", () => {
+
+				it( "returns the status of a 4xx or 5xx, with no feed", () => {
+					var gone = fetcher.fetch( feeds.at( "/gone" ) )
+					expect( gone.status ).toBe( 410 )
+					expect( gone.notModified ).toBeFalse()
+					expect( isNull( gone.feed ) ).toBeTrue()
+					expect( fetcher.fetch( feeds.at( "/error" ) ).status ).toBe( 500 )
+					expect( fetcher.fetch( feeds.at( "/nothing-here" ) ).status ).toBe( 404 )
+				} )
+
+				it( "throws Feeds.ParseError for a 200 that isn't a feed", () => {
+					expect( () => fetcher.fetch( feeds.at( "/html" ) ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+				it( "throws Feeds.FetchError when nothing answers", () => {
+					var closed = new tests.helpers.FeedServer()
+					var address = closed.at( "/feed.xml" )
+					closed.stop()
+					expect( () => fetcher.fetch( address, { timeoutSeconds: 2 } ) ).toThrow( type = "Feeds.FetchError" )
+				} )
+
+				it( "throws Feeds.FetchError for anything but http(s)", () => {
+					expect( () => fetcher.fetch( "file:///etc/hosts" ) ).toThrow( type = "Feeds.FetchError" )
+					expect( () => fetcher.fetch( "ftp://example.com/feed.xml" ) ).toThrow( type = "Feeds.FetchError" )
+					expect( () => fetcher.fetch( "not a url" ) ).toThrow( type = "Feeds.FetchError" )
+					expect( () => fetcher.fetch( "" ) ).toThrow( type = "Feeds.FetchError" )
+				} )
+
+			} )
+
+		} )
+
+	}
+
+}

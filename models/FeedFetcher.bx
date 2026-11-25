@@ -41,7 +41,7 @@ class {
 		for ( var hop = 0; hop <= config.maxRedirects; hop++ ) {
 			var connection = open( current, config, deadline )
 			try {
-				var status = attempt( () => connection.getResponseCode() )
+				var status = overNetwork( () => connection.getResponseCode() )
 				var location = trim( connection.getHeaderField( "Location" ) ?: "" )
 				if ( static.REDIRECTS.contains( status ) && len( location ) ) {
 					current = variables.parser.resolveUrl( location, current )
@@ -81,7 +81,7 @@ class {
 		}
 		var remaining = remainingMs( arguments.deadline )
 		var address = arguments.target
-		var connection = attempt( () => createObject( "java", "java.net.URI" ).init( address ).toURL().openConnection() )
+		var connection = overNetwork( () => createObject( "java", "java.net.URI" ).init( address ).toURL().openConnection() )
 		connection.setInstanceFollowRedirects( false )
 		connection.setConnectTimeout( remaining )
 		connection.setReadTimeout( remaining )
@@ -105,7 +105,7 @@ class {
 		if ( connection.getContentLengthLong() > limit ) {
 			tooLarge( limit )
 		}
-		return attempt( () => {
+		return overNetwork( () => {
 			var stream = connection.getInputStream()
 			if ( lcase( connection.getContentEncoding() ?: "" ) == "gzip" ) {
 				stream = createObject( "java", "java.util.zip.GZIPInputStream" ).init( stream )
@@ -145,7 +145,7 @@ class {
 	}
 
 	/** Runs a network call, turning what Java throws into Feeds.FetchError (a timeout into Feeds.FetchError.Timeout). */
-	private function attempt( required function call ) {
+	private function overNetwork( required function call ) {
 		try {
 			return arguments.call()
 		} catch ( "Feeds.FetchError" e ) {
