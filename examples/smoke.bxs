@@ -1,5 +1,5 @@
 /**
- * The three BIFs end to end, with no network: a feed is parsed, a page's feeds
+ * The BIFs end to end, with no network: a feed is parsed, a page's feeds
  * are discovered, and a feed is fetched twice from a server this script starts
  * on a free local port (the second time it hasn't changed).
  *   boxlang examples/smoke.bxs        with bx-feeds in ./boxlang_modules or BoxLang HOME
@@ -26,7 +26,8 @@ for ( found in discoverFeeds( page, "https://example.com/blog/" ) ) {
 	println( "Discovered #found.url# (#found.type#, #found.title#)" )
 }
 
-// 3. Fetch, then fetch again with what the first answer said.
+// 3. Fetch, then fetch again with what the first answer said. The server is on
+// this machine, which fetchFeed() refuses unless it's told that's fine.
 httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( createObject( "java", "java.net.InetSocketAddress" ).init( "127.0.0.1", 0 ), 0 )
 httpServer.createContext( "/", ( exchange ) => {
 	exchange.getResponseHeaders().set( "ETag", '"smoke-1"' )
@@ -50,7 +51,17 @@ try {
 	httpServer.stop( 0 )
 }
 
-// 4. What can't be read is a typed error.
+// 4. OPML out and back in.
+xml = toOpml( [ { title: "News", outlines: [ { title: feed.title, feedUrl: "https://example.com/feed.xml", siteUrl: feed.link } ] } ], "My feeds" )
+list = parseOpml( xml )
+println( "OPML '#list.title#': #list.outlines[ 1 ].title# > #list.outlines[ 1 ].outlines[ 1 ].feedUrl#" )
+
+// 5. What can't be read, or mustn't be fetched, is a typed error.
+try {
+	fetchFeed( "http://127.0.0.1/feed.xml" )
+} catch ( "Feeds.FetchError" e ) {
+	println( "Refused: #e.message#" )
+}
 try {
 	parseFeed( "<html><body>Not a feed</body></html>" )
 } catch ( "Feeds.ParseError" e ) {
