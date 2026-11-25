@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+	<channel>
+		<title>Example Blog</title>
+		<link>https://blog.example/</link>
+		<description>Notes on things</description>
+		<language>en-GB</language>
+		<lastBuildDate>Tue, 03 Nov 2026 09:30:00 GMT</lastBuildDate>
+		<image>
+			<url>https://blog.example/icon.png</url>
+			<title>Example Blog</title>
+			<link>https://blog.example/</link>
+		</image>
+		<item>
+			<title>Hello, world</title>
+			<link>https://blog.example/hello</link>
+			<guid isPermaLink="false">tag:blog.example,2026:hello</guid>
+			<pubDate>Mon, 02 Nov 2026 10:00:00 -0500</pubDate>
+			<dc:creator>Ada Lovelace</dc:creator>
+			<category>News</category>
+			<category>news</category>
+			<category>BoxLang</category>
+			<description>A short hello.</description>
+			<content:encoded><![CDATA[<p>The <em>full</em> hello, with a <a href="/about">link</a> and <img src="img/wave.png" alt="wave">.</p>]]></content:encoded>
+		</item>
+		<item>
+			<title>Only a description</title>
+			<link>https://blog.example/second</link>
+			<guid>https://blog.example/second</guid>
+			<pubDate>Sun, 01 Nov 2026 08:15:00 GMT</pubDate>
+			<author>grace@blog.example (Grace Hopper)</author>
+			<description><![CDATA[<p>Just <b>this</b>.</p>]]></description>
+		</item>
+	</channel>
+</rss>

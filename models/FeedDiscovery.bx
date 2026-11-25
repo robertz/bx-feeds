@@ -1,0 +1,72 @@
+/**
+ * Feed autodiscovery: the <link rel="alternate"> tags of a page that point at
+ * a feed, in page order, as absolute URLs.
+ *
+ *   feeds = new bxModules.bxFeeds.models.FeedDiscovery().discover( html, "https://example.com/blog/" )
+ *   // [ { url: "https://example.com/feed.xml", type: "application/rss+xml", title: "Example" } ]
+ */
+class {
+
+	static {
+		REGEX = createObject( "java", "java.util.regex.Pattern" )
+		TAG = REGEX.compile( "(?is)<(link|base)\s([^>]*)>" )
+		ATTRIBUTE = REGEX.compile( "(?is)([a-z][a-z0-9:-]*)\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s""'>]+))" )
+		TYPES = [ "application/rss+xml", "application/atom+xml", "application/feed+json", "application/json" ]
+		ENTITIES = { "&amp;": "&", "&quot;": """", "&##39;": "'", "&##x27;": "'", "&apos;": "'", "&lt;": "<", "&gt;": ">" }
+	}
+
+	function init() {
+		variables.parser = new FeedParser()
+		return this
+	}
+
+	/** baseUrl: the page's address; a <base href> in the page is honored on top of it. */
+	array function discover( required string html, string baseUrl = "" ) {
+		var base = trim( arguments.baseUrl )
+		var found = []
+		var seen = []
+		var tags = static.TAG.matcher( reReplace( arguments.html, "(?s)<!--.*?-->", "", "all" ) )
+		while ( tags.find() ) {
+			var attributes = attributesOf( tags.group( 2 ) )
+			var href = trim( attributes.href ?: "" )
+			if ( !len( href ) ) {
+				continue
+			}
+			if ( lcase( tags.group( 1 ) ) == "base" ) {
+				base = variables.parser.resolveUrl( href, base )
+				continue
+			}
+			var type = lcase( trim( listFirst( attributes.type ?: "", ";" ) ) )
+			if ( !listFindNoCase( attributes.rel ?: "", "alternate", " " ) || !static.TYPES.contains( type ) ) {
+				continue
+			}
+			var feedUrl = variables.parser.resolveUrl( href, base )
+			if ( !seen.contains( feedUrl ) ) {
+				seen.append( feedUrl )
+				found.append( { url: feedUrl, type: type, title: trim( attributes.title ?: "" ) } )
+			}
+		}
+		return found
+	}
+
+	private struct function attributesOf( required string source ) {
+		var attributes = {}
+		var matcher = static.ATTRIBUTE.matcher( arguments.source )
+		while ( matcher.find() ) {
+			var name = lcase( matcher.group( 1 ) )
+			if ( !attributes.keyExists( name ) ) {
+				attributes[ name ] = unescaped( matcher.group( 2 ) ?: matcher.group( 3 ) ?: matcher.group( 4 ) ?: "" )
+			}
+		}
+		return attributes
+	}
+
+	private string function unescaped( required string value ) {
+		var text = arguments.value
+		for ( var entity in static.ENTITIES ) {
+			text = replaceNoCase( text, entity, static.ENTITIES[ entity ], "all" )
+		}
+		return text
+	}
+
+}

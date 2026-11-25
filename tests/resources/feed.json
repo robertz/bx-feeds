@@ -1,0 +1,36 @@
+{
+	"version": "https://jsonfeed.org/version/1.1",
+	"title": "JSON Example",
+	"home_page_url": "https://json.example/",
+	"feed_url": "https://json.example/feed.json",
+	"description": "A JSON Feed",
+	"language": "en-US",
+	"icon": "/icon-512.png",
+	"favicon": "/favicon.ico",
+	"authors": [ { "name": "Site Author", "url": "https://json.example/me" } ],
+	"items": [
+		{
+			"id": "https://json.example/posts/2",
+			"url": "https://json.example/posts/2",
+			"title": "Second",
+			"content_html": "<p>Hello with <a href=\"/tags/x\">a tag</a></p>",
+			"summary": "Hello",
+			"date_published": "2026-11-02T10:00:00-05:00",
+			"date_modified": "2026-11-02T16:30:00Z",
+			"authors": [ { "name": "Guest Writer" } ],
+			"tags": [ "one", "two" ],
+			"attachments": [ { "url": "/audio/2.mp3", "mime_type": "audio/mpeg", "size_in_bytes": 4096, "duration_in_seconds": 60 } ]
+		},
+		{
+			"id": 1,
+			"external_url": "https://elsewhere.example/thing",
+			"content_text": "Plain & simple\nsecond line",
+			"date_published": "not a date"
+		},
+		{
+			"url": "posts/0",
+			"title": "No id here",
+			"content_text": "old"
+		}
+	]
+}

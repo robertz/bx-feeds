@@ -1,0 +1,444 @@
+/**
+ * Reads RSS (0.9x, 1.0, 2.0) and Atom with ROME, and JSON Feed 1.0/1.1 by hand,
+ * into one struct shape:
+ *
+ *   feed = new bxModules.bxFeeds.models.FeedParser().parse( bytes, { baseUrl: "https://example.com/feed.xml" } )
+ *   // { type, title, link, description, language, updated, image, items: [
+ *   //   { id, title, link, published, updated, authors, summary, contentHtml, categories, enclosures } ] }
+ *
+ * Dates are BoxLang datetimes in UTC, or null. HTML is returned as the feed gave
+ * it, only with relative URLs made absolute: sanitize it before showing it.
+ * Anything unreadable throws Feeds.ParseError.
+ */
+class {
+
+	static {
+		REGEX = createObject( "java", "java.util.regex.Pattern" )
+		// the DOCTYPE, internal subset and all, when it comes before the root element
+		DOCTYPE = REGEX.compile( "(?is)^((?:\s|<\?.*?\?>|<!--.*?-->)*)<!DOCTYPE[^\[>]*(?:\[.*?\]\s*)?>" )
+		TAG = REGEX.compile( "<[A-Za-z][^>]*>" )
+		URL_ATTRIBUTE = REGEX.compile( "(?i)(\s(?:href|src|poster)\s*=\s*)(""|')(.*?)\2" )
+		SCHEME = REGEX.compile( "^[A-Za-z][A-Za-z0-9+.-]*:" )
+		LATIN = REGEX.compile( "(?i)^(ISO-8859-1|windows-1252|US-ASCII)$" )
+		UTC = createObject( "java", "java.time.ZoneOffset" ).UTC
+	}
+
+	function init() {
+		return this
+	}
+
+	/**
+	 * input: the feed as a string, as bytes, or the path of a file holding it.
+	 * options: { baseUrl: where the feed came from, for resolving relative URLs,
+	 *            contentType: its HTTP Content-Type header, for the charset of bytes }
+	 */
+	struct function parse( required input, struct options = {} ) {
+		var baseUrl = trim( arguments.options.baseUrl ?: "" )
+		var text = textOf( arguments.input, arguments.options.contentType ?: "" )
+		if ( left( text, 1 ) == "{" ) {
+			return fromJson( text, baseUrl )
+		}
+		return fromXml( text, baseUrl )
+	}
+
+	/** The document as text: a string as it is, a file's or a response's bytes decoded. */
+	private string function textOf( required input, required string contentType ) {
+		var given = arguments.input
+		if ( isSimpleValue( given ) && !isBinary( given ) ) {
+			var head = startOf( toString( given ) )
+			if ( left( head, 1 ) == "<" || left( head, 1 ) == "{" ) {
+				return head
+			}
+			if ( !len( head ) || len( head ) > 4096 || !fileExists( head ) ) {
+				unreadable( "That's neither a feed nor the path of a file" )
+			}
+			given = fileReadBinary( head )
+		}
+		if ( !isBinary( given ) ) {
+			unreadable( "A feed is a string, bytes or a file path" )
+		}
+		return startOf( decoded( given, arguments.contentType ) )
+	}
+
+	/** Without the byte order mark and the whitespace many feeds put before <?xml, which XML parsers refuse. */
+	private string function startOf( required string text ) {
+		return reReplace( arguments.text, "^[﻿\s]+", "" )
+	}
+
+	/**
+	 * Bytes to text in the charset ROME's XmlReader works out (BOM, then the HTTP
+	 * header, then the XML declaration, leniently). Two lies are corrected: bytes
+	 * declared UTF-8 that aren't are read as windows-1252, and bytes declared
+	 * Latin-1 that are valid multi-byte UTF-8 are read as UTF-8.
+	 */
+	private string function decoded( required bytes, required string contentType ) {
+		var encoding = "UTF-8"
+		try {
+			var stream = createObject( "java", "java.io.ByteArrayInputStream" ).init( arguments.bytes )
+			var reader = len( arguments.contentType )
+				? createObject( "java", "com.rometools.rome.io.XmlReader" ).init( stream, arguments.contentType, true )
+				: createObject( "java", "com.rometools.rome.io.XmlReader" ).init( stream, true )
+			encoding = reader.getEncoding() ?: "UTF-8"
+			reader.close()
+		} catch ( any e ) {
+			// no charset to be found: UTF-8, checked below
+		}
+		var javaString = createObject( "java", "java.lang.String" )
+		if ( static.LATIN.matcher( encoding ).matches() ) {
+			try {
+				var utf8 = strictly( arguments.bytes, "UTF-8" )
+				if ( len( utf8 ) < arrayLen( arguments.bytes ) ) {
+					return utf8
+				}
+			} catch ( any e ) {
+				// Latin-1 after all
+			}
+		}
+		try {
+			return strictly( arguments.bytes, encoding )
+		} catch ( any e ) {
+			return javaString.init( arguments.bytes, encoding == "UTF-8" ? "windows-1252" : encoding )
+		}
+	}
+
+	/** Decodes, throwing on bytes that aren't the charset's, where String's constructor would substitute. */
+	private string function strictly( required bytes, required string encoding ) {
+		return createObject( "java", "java.nio.charset.Charset" ).forName( arguments.encoding ).newDecoder()
+			.decode( createObject( "java", "java.nio.ByteBuffer" ).wrap( arguments.bytes ) ).toString()
+	}
+
+	private struct function fromXml( required string text, required string baseUrl ) {
+		var input = createObject( "java", "com.rometools.rome.io.SyndFeedInput" ).init()
+		// no DTD is ever read: the DOCTYPE is cut out first (old RSS 0.91 feeds carry one), and the parser
+		// refuses any that's left, so entities a DTD would define (XXE, entity bombs) are simply undefined
+		input.setAllowDoctypes( false )
+		// the RSS <guid> is only on the item ROME read, see idOf()
+		input.setPreserveWireFeed( true )
+		var synd = ""
+		try {
+			synd = input.build( createObject( "java", "java.io.StringReader" ).init( static.DOCTYPE.matcher( arguments.text ).replaceFirst( "$1" ) ) )
+		} catch ( any e ) {
+			unreadable( "That isn't a readable RSS or Atom feed", e.message ?: "" )
+		}
+		var type = synd.getFeedType() ?: ""
+		var link = resolveUrl( siteLinkOf( synd ), arguments.baseUrl )
+		// Atom's relative URLs are relative to the document, RSS's by convention to the channel's link
+		var base = type.startsWith( "atom" ) && len( arguments.baseUrl ) ? arguments.baseUrl : ( isAbsolute( link ) ? link : arguments.baseUrl )
+		var image = synd.getImage() ?: synd.getIcon()
+		var items = []
+		for ( var entry in synd.getEntries() ) {
+			items.append( itemOf( entry, type, base ) )
+		}
+		return {
+			type        : type,
+			title       : trim( synd.getTitle() ?: "" ),
+			link        : link,
+			description : trim( synd.getDescription() ?: "" ),
+			language    : trim( synd.getLanguage() ?: "" ),
+			updated     : utc( synd.getPublishedDate() ),
+			image       : isNull( image ) ? "" : resolveUrl( image.getUrl() ?: "", base ),
+			items       : items
+		}
+	}
+
+	private struct function itemOf( required entry, required string type, required string base ) {
+		var rawLink = trim( arguments.entry.getLink() ?: "" )
+		var link = resolveUrl( rawLink, arguments.base )
+		var contentBase = isAbsolute( link ) ? link : arguments.base
+		var title = trim( arguments.entry.getTitle() ?: "" )
+		var isAtom = arguments.type.startsWith( "atom" )
+
+		var description = arguments.entry.getDescription()
+		var summary = isNull( description ) ? "" : ( description.getValue() ?: "" )
+		var content = ""
+		for ( var body in arguments.entry.getContents() ) {
+			if ( len( trim( body.getValue() ?: "" ) ) ) {
+				content = isAtom && isText( body.getType() ?: "" ) ? textToHtml( body.getValue() ) : body.getValue()
+				break
+			}
+		}
+		if ( !len( content ) && len( trim( summary ) ) ) {
+			// RSS descriptions hold HTML whatever the version says; only Atom's type="text" means it
+			content = isAtom && isText( description.getType() ?: "" ) ? textToHtml( summary ) : summary
+		}
+
+		var authors = []
+		for ( var person in arguments.entry.getAuthors() ) {
+			addOnce( authors, len( trim( person.getName() ?: "" ) ) ? person.getName() : ( person.getEmail() ?: "" ) )
+		}
+		if ( !authors.len() ) {
+			addOnce( authors, arguments.entry.getAuthor() ?: "" )
+		}
+		var categories = []
+		for ( var category in arguments.entry.getCategories() ) {
+			addOnce( categories, category.getName() ?: "" )
+		}
+		var enclosures = []
+		for ( var enclosure in arguments.entry.getEnclosures() ) {
+			if ( len( trim( enclosure.getUrl() ?: "" ) ) ) {
+				enclosures.append( {
+					url    : resolveUrl( enclosure.getUrl(), arguments.base ),
+					type   : trim( enclosure.getType() ?: "" ),
+					length : max( enclosure.getLength(), 0 )
+				} )
+			}
+		}
+		return {
+			id          : idOf( nativeId( arguments.entry, arguments.type ), rawLink, title, isoOf( utc( arguments.entry.getPublishedDate() ) ), content ),
+			title       : title,
+			link        : link,
+			published   : utc( arguments.entry.getPublishedDate() ),
+			updated     : utc( arguments.entry.getUpdatedDate() ),
+			authors     : authors,
+			summary     : absolutize( summary, contentBase ),
+			contentHtml : absolutize( content, contentBase ),
+			categories  : categories,
+			enclosures  : enclosures
+		}
+	}
+
+	/**
+	 * The id the feed itself gave the item: Atom's <id>, RSS's <guid>, RSS 1.0's
+	 * rdf:about. ROME's getUri() falls back to the link when RSS has no guid,
+	 * so RSS is read from the item as parsed.
+	 */
+	private string function nativeId( required entry, required string type ) {
+		if ( arguments.type.startsWith( "atom" ) ) {
+			return arguments.entry.getUri() ?: ""
+		}
+		var wire = arguments.entry.getWireEntry()
+		if ( isNull( wire ) ) {
+			return ""
+		}
+		if ( arguments.type == "rss_1.0" ) {
+			return wire.getUri() ?: ""
+		}
+		var guid = wire.getGuid()
+		return isNull( guid ) ? "" : ( guid.getValue() ?: "" )
+	}
+
+	/**
+	 * An item's stable id. The feed's own id when it gives one, as it is. Otherwise
+	 * "sha256:" and the hash of the link as written in the feed and the title;
+	 * with no title, of the link and the published time; with neither, of the
+	 * link and the content.
+	 */
+	private string function idOf( required string native, required string link, required string title, required string published, required string content ) {
+		if ( len( trim( arguments.native ) ) ) {
+			return trim( arguments.native )
+		}
+		var second = len( arguments.title ) ? arguments.title : ( len( arguments.published ) ? arguments.published : arguments.content )
+		return "sha256:" & lcase( hash( arguments.link & char( 10 ) & second, "SHA-256", "UTF-8" ) )
+	}
+
+	/** Atom lists a rel="self" link too; the site is the alternate one. */
+	private string function siteLinkOf( required synd ) {
+		for ( var link in arguments.synd.getLinks() ?: [] ) {
+			var rel = lcase( trim( link.getRel() ?: "" ) )
+			if ( ( rel == "" || rel == "alternate" ) && len( trim( link.getHref() ?: "" ) ) ) {
+				return link.getHref()
+			}
+		}
+		return arguments.synd.getLink() ?: ""
+	}
+
+	/** JSON Feed 1.0 and 1.1 (jsonfeed.org), mapped to the shape ROME's feeds get. */
+	private struct function fromJson( required string text, required string baseUrl ) {
+		var doc = ""
+		try {
+			doc = jsonDeserialize( arguments.text )
+		} catch ( any e ) {
+			unreadable( "That isn't a readable JSON Feed", e.message ?: "" )
+		}
+		var version = isStruct( doc ) ? reMatchNoCase( "^https?://jsonfeed\.org/version/([0-9.]+)$", trim( jsonText( doc, "version" ) ) ) : []
+		if ( !version.len() || !isArray( doc.items ?: "" ) ) {
+			unreadable( "That isn't a readable JSON Feed" )
+		}
+		var link = resolveUrl( jsonText( doc, "home_page_url" ), arguments.baseUrl )
+		var base = isAbsolute( link ) ? link : arguments.baseUrl
+		var icon = jsonText( doc, "icon" )
+		var feedAuthors = jsonAuthors( doc )
+		var items = []
+		for ( var entry in doc.items ) {
+			if ( isStruct( entry ) ) {
+				items.append( jsonItem( entry, base, feedAuthors ) )
+			}
+		}
+		return {
+			type        : "json_" & listLast( version[ 1 ], "/" ),
+			title       : trim( jsonText( doc, "title" ) ),
+			link        : link,
+			description : trim( jsonText( doc, "description" ) ),
+			language    : trim( jsonText( doc, "language" ) ),
+			updated     : javacast( "null", "" ),
+			image       : resolveUrl( len( icon ) ? icon : jsonText( doc, "favicon" ), base ),
+			items       : items
+		}
+	}
+
+	private struct function jsonItem( required struct entry, required string base, required array feedAuthors ) {
+		var rawLink = trim( jsonText( arguments.entry, "url" ) )
+		if ( !len( rawLink ) ) {
+			rawLink = trim( jsonText( arguments.entry, "external_url" ) )
+		}
+		var link = resolveUrl( rawLink, arguments.base )
+		var contentBase = isAbsolute( link ) ? link : arguments.base
+		var title = trim( jsonText( arguments.entry, "title" ) )
+		var content = jsonText( arguments.entry, "content_html" )
+		if ( !len( trim( content ) ) ) {
+			content = textToHtml( jsonText( arguments.entry, "content_text" ) )
+		}
+		var authors = jsonAuthors( arguments.entry )
+		var categories = []
+		for ( var tag in isArray( arguments.entry.tags ?: "" ) ? arguments.entry.tags : [] ) {
+			if ( isSimpleValue( tag ) ) {
+				addOnce( categories, toString( tag ) )
+			}
+		}
+		var enclosures = []
+		for ( var attachment in isArray( arguments.entry.attachments ?: "" ) ? arguments.entry.attachments : [] ) {
+			if ( isStruct( attachment ) && len( trim( jsonText( attachment, "url" ) ) ) ) {
+				var size = jsonText( attachment, "size_in_bytes" )
+				enclosures.append( {
+					url    : resolveUrl( jsonText( attachment, "url" ), arguments.base ),
+					type   : trim( jsonText( attachment, "mime_type" ) ),
+					length : isNumeric( size ) && size > 0 ? size + 0 : 0
+				} )
+			}
+		}
+		return {
+			id          : idOf( jsonText( arguments.entry, "id" ), rawLink, title, isoOf( rfc3339( jsonText( arguments.entry, "date_published" ) ) ), content ),
+			title       : title,
+			link        : link,
+			published   : rfc3339( jsonText( arguments.entry, "date_published" ) ),
+			updated     : rfc3339( jsonText( arguments.entry, "date_modified" ) ),
+			authors     : authors.len() ? authors : arguments.feedAuthors,
+			summary     : jsonText( arguments.entry, "summary" ),
+			contentHtml : absolutize( content, contentBase ),
+			categories  : categories,
+			enclosures  : enclosures
+		}
+	}
+
+	/** Names from 1.1's authors array and 1.0's single author. */
+	private array function jsonAuthors( required struct holder ) {
+		var people = isArray( arguments.holder.authors ?: "" ) ? duplicate( arguments.holder.authors ) : []
+		if ( isStruct( arguments.holder.author ?: "" ) ) {
+			people.append( arguments.holder.author )
+		}
+		var names = []
+		for ( var person in people ) {
+			if ( isStruct( person ) ) {
+				addOnce( names, jsonText( person, "name" ) )
+			}
+		}
+		return names
+	}
+
+	/** A JSON value as a string: "" for a missing key, null, an object or an array. */
+	private string function jsonText( required struct data, required string key ) {
+		if ( !arguments.data.keyExists( arguments.key ) || isNull( arguments.data[ arguments.key ] ) ) {
+			return ""
+		}
+		var value = arguments.data[ arguments.key ]
+		return isSimpleValue( value ) ? toString( value ) : ""
+	}
+
+	/** An RFC 3339 time as a UTC datetime; one without an offset is taken as UTC; null when it isn't one. */
+	private function rfc3339( required string value ) {
+		var given = trim( arguments.value )
+		if ( len( given ) ) {
+			try {
+				return utc( createObject( "java", "java.time.OffsetDateTime" ).parse( given ).toInstant() )
+			} catch ( any e ) {
+				try {
+					return utc( createObject( "java", "java.time.LocalDateTime" ).parse( given ).toInstant( static.UTC ) )
+				} catch ( any e2 ) {
+					// not a date
+				}
+			}
+		}
+		return javacast( "null", "" )
+	}
+
+	/** A java.util.Date or Instant as a BoxLang datetime in UTC; null stays null. */
+	private function utc( moment ) {
+		if ( isNull( arguments.moment ) ) {
+			return javacast( "null", "" )
+		}
+		var instant = isInstanceOf( arguments.moment, "java.util.Date" ) ? arguments.moment.toInstant() : arguments.moment
+		return createObject( "java", "ortus.boxlang.runtime.types.DateTime" ).init( instant.atZone( static.UTC ) )
+	}
+
+	/** A datetime as 2026-11-02T15:00:00Z, "" for null. A null can't be kept in a variable where bx-compat-cfml is loaded. */
+	private string function isoOf( moment ) {
+		return isNull( arguments.moment ) ? "" : arguments.moment.toISOString()
+	}
+
+	/**
+	 * href resolved against base. Returned as written when there's no base or
+	 * the two don't make a URL.
+	 */
+	string function resolveUrl( required string href, string base = "" ) {
+		var target = trim( arguments.href )
+		if ( !len( target ) || !len( arguments.base ) ) {
+			return target
+		}
+		try {
+			var baseUri = createObject( "java", "java.net.URI" ).init( trim( arguments.base ) )
+			// java.net.URI resolves "a" against "http://host" to "http://hosta"
+			if ( !len( baseUri.getRawPath() ?: "" ) && !isNull( baseUri.getHost() ) ) {
+				baseUri = baseUri.resolve( "/" )
+			}
+			return baseUri.resolve( target ).toString()
+		} catch ( any e ) {
+			return target
+		}
+	}
+
+	/** The HTML with relative href, src and poster attributes made absolute; nothing else is touched. */
+	private string function absolutize( required string html, required string base ) {
+		if ( !isAbsolute( arguments.base ) || !find( "<", arguments.html ) ) {
+			return arguments.html
+		}
+		var tags = static.TAG.matcher( arguments.html )
+		var out = createObject( "java", "java.lang.StringBuilder" ).init()
+		while ( tags.find() ) {
+			var attributes = static.URL_ATTRIBUTE.matcher( tags.group() )
+			var tag = createObject( "java", "java.lang.StringBuilder" ).init()
+			while ( attributes.find() ) {
+				var value = attributes.group( 3 )
+				var resolved = isAbsolute( value ) || left( trim( value ), 1 ) == "##" ? value : resolveUrl( value, arguments.base )
+				attributes.appendReplacement( tag, tags.quoteReplacement( attributes.group( 1 ) & attributes.group( 2 ) & resolved & attributes.group( 2 ) ) )
+			}
+			attributes.appendTail( tag )
+			tags.appendReplacement( out, tags.quoteReplacement( tag.toString() ) )
+		}
+		tags.appendTail( out )
+		return out.toString()
+	}
+
+	private boolean function isAbsolute( required string value ) {
+		return static.SCHEME.matcher( trim( arguments.value ) ).find()
+	}
+
+	private boolean function isText( required string type ) {
+		return listFindNoCase( "text,text/plain", trim( arguments.type ) ) > 0
+	}
+
+	private string function textToHtml( required string text ) {
+		return reReplace( encodeForHTML( trim( arguments.text ) ), "\r?\n", "<br>", "all" )
+	}
+
+	private void function addOnce( required array list, required string value ) {
+		var text = trim( arguments.value )
+		if ( len( text ) && !arguments.list.findNoCase( text ) ) {
+			arguments.list.append( text )
+		}
+	}
+
+	private void function unreadable( required string message, string detail = "" ) {
+		throw( type = "Feeds.ParseError", message = arguments.message, detail = arguments.detail )
+	}
+
+}

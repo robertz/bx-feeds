@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE rss SYSTEM "{{HTTP}}/evil.dtd">
+<rss version="2.0">
+	<channel>
+		<title>External DTD</title>
+		<link>http://dtd.example/</link>
+		<description>Its DTD lives on another server</description>
+		<item><title>One</title><link>http://dtd.example/1</link></item>
+	</channel>
+</rss>

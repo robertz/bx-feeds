@@ -1,0 +1,15 @@
+/**
+ * Fetches and parses a feed with a conditional GET. The module's settings
+ * (userAgent, timeoutSeconds, maxBytes, maxRedirects) can be overridden in options.
+ *
+ *   result = fetchFeed( "https://example.com/feed.xml", { etag: saved.etag, lastModified: saved.lastModified } )
+ *   if ( !result.notModified && result.status == 200 ) save( result.feed, result.etag, result.lastModified )
+ */
+@BoxBIF
+class {
+
+	function invoke( required string feedUrl, struct options = {} ) {
+		return new bxModules.bxFeeds.models.FeedFetcher().fetch( arguments.feedUrl, arguments.options )
+	}
+
+}

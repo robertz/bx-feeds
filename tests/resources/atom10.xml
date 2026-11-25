@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+	<title>Atom Example</title>
+	<subtitle>A feed that follows the rules</subtitle>
+	<link rel="self" type="application/atom+xml" href="https://atom.example/blog/feed.xml"/>
+	<link rel="alternate" type="text/html" href="https://atom.example/blog/"/>
+	<id>urn:uuid:60a76c80-d399-11d9-b93C-0003939e0af6</id>
+	<updated>2026-11-03T18:30:02Z</updated>
+	<logo>images/logo.png</logo>
+	<author><name>Feed Author</name></author>
+	<entry>
+		<title>Atom-Powered Robots Run Amok</title>
+		<link rel="alternate" href="posts/robots.html"/>
+		<link rel="enclosure" type="audio/mpeg" length="1337" href="audio/robots.mp3"/>
+		<id>urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a</id>
+		<published>2026-11-01T09:00:00+02:00</published>
+		<updated>2026-11-03T18:30:02Z</updated>
+		<author><name>John Doe</name><email>john@atom.example</email></author>
+		<author><name>Jane Roe</name></author>
+		<category term="robots"/>
+		<category term="amok"/>
+		<summary>Some text.</summary>
+		<content type="html">&lt;p&gt;Robots, &lt;a href="../about.html"&gt;about&lt;/a&gt;.&lt;/p&gt;</content>
+	</entry>
+	<entry>
+		<title>Plain text entry</title>
+		<link href="https://atom.example/blog/posts/plain.html"/>
+		<id>https://atom.example/blog/posts/plain.html</id>
+		<updated>2026-10-30T12:00:00Z</updated>
+		<content type="text">1 &lt; 2 &amp; that's plain
+second line</content>
+	</entry>
+</feed>

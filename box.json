@@ -1,0 +1,55 @@
+{
+    "name":"BxFeeds",
+    "version":"0.1.0",
+    "author":"Robert Zehnder",
+    "slug":"bx-feeds",
+    "shortDescription":"RSS, Atom and JSON Feed for BoxLang: fetch with conditional GET, parse with ROME into one clean struct, discover feeds in a page.",
+    "type":"boxlang-modules",
+    "keywords":[
+        "boxlang",
+        "rss",
+        "atom",
+        "json feed",
+        "feeds",
+        "rome"
+    ],
+    "homepage":"https://github.com/robertz/bx-feeds",
+    "repository":{
+        "type":"git",
+        "URL":"https://github.com/robertz/bx-feeds"
+    },
+    "boxlang":{
+        "minimumVersion":"1.19.0",
+        "moduleName":"bxFeeds"
+    },
+    "private":false,
+    "license":[
+        {
+            "type":"MIT",
+            "URL":"https://opensource.org/licenses/MIT"
+        }
+    ],
+    "devDependencies":{
+        "testbox":"^7.0.0",
+        "bx-compat-cfml":"^1.36.0"
+    },
+    "installPaths":{
+        "testbox":"testbox/",
+        "bx-compat-cfml":"test-modules/bx-compat-cfml/"
+    },
+    "scripts":{
+        "preVersion":"!bash scripts/test.sh",
+        "postPublish":"!git push --follow-tags && bash scripts/release.sh"
+    },
+    "ignore":[
+        "**/.*",
+        "tests/**",
+        "testbox/**",
+        "boxlang_modules/**",
+        "test-modules/**",
+        "run-tests.bxs",
+        "setup-tests.bxs",
+        "scripts/**",
+        "docs/**"
+    ]
+}

@@ -1,0 +1,171 @@
+/**
+ * Fetches a feed over http(s) and parses it, with a conditional GET so an
+ * unchanged feed costs one small request:
+ *
+ *   result = new bxModules.bxFeeds.models.FeedFetcher().fetch( feedUrl, { etag: saved.etag, lastModified: saved.lastModified } )
+ *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, feed }
+ *
+ * feed is the FeedParser struct on a 200 and null otherwise (304, 404, 500...).
+ * Redirects are followed by hand so permanent ones can be reported. A network
+ * failure throws Feeds.FetchError, or its subtypes Feeds.FetchError.Timeout,
+ * .TooLarge and .TooManyRedirects; a 200 that isn't a feed throws Feeds.ParseError.
+ */
+class {
+
+	property name="settings";
+
+	static {
+		ACCEPT = "application/feed+json, application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
+		REDIRECTS = [ 301, 302, 303, 307, 308 ]
+	}
+
+	/** overrides: any of the module's settings (userAgent, timeoutSeconds, maxBytes, maxRedirects). */
+	function init( struct overrides = {} ) {
+		variables.settings = duplicate( getModuleInfo( "bxFeeds" ).settings ).append( arguments.overrides )
+		variables.parser = new FeedParser()
+		return this
+	}
+
+	/**
+	 * options: { etag, lastModified: from the last fetch's result, sent as If-None-Match and
+	 *            If-Modified-Since; userAgent, timeoutSeconds, maxBytes, maxRedirects: for this call }
+	 * timeoutSeconds covers the whole fetch, redirects and body included; maxBytes
+	 * counts the body after gzip is undone.
+	 */
+	struct function fetch( required string feedUrl, struct options = {} ) {
+		var config = duplicate( variables.settings ).append( arguments.options )
+		var deadline = getTickCount() + config.timeoutSeconds * 1000
+		var current = trim( arguments.feedUrl )
+		var permanentUrl = ""
+		var onlyPermanent = true
+		for ( var hop = 0; hop <= config.maxRedirects; hop++ ) {
+			var connection = open( current, config, deadline )
+			try {
+				var status = attempt( () => connection.getResponseCode() )
+				var location = trim( connection.getHeaderField( "Location" ) ?: "" )
+				if ( static.REDIRECTS.contains( status ) && len( location ) ) {
+					current = variables.parser.resolveUrl( location, current )
+					// a 301 or 308 moves the feed for good, but only until a temporary hop: what's behind that may change
+					onlyPermanent = onlyPermanent && ( status == 301 || status == 308 )
+					if ( onlyPermanent ) {
+						permanentUrl = current
+					}
+					continue
+				}
+				var result = {
+					status       : status,
+					notModified  : status == 304,
+					etag         : connection.getHeaderField( "ETag" ) ?: ( status == 304 ? ( config.etag ?: "" ) : "" ),
+					lastModified : connection.getHeaderField( "Last-Modified" ) ?: ( status == 304 ? ( config.lastModified ?: "" ) : "" ),
+					finalUrl     : current,
+					permanentUrl : permanentUrl,
+					feed         : javacast( "null", "" )
+				}
+				if ( status == 200 ) {
+					result.feed = variables.parser.parse(
+						bodyOf( connection, config.maxBytes, deadline ),
+						{ baseUrl: current, contentType: connection.getContentType() ?: "" }
+					)
+				}
+				return result
+			} finally {
+				connection.disconnect()
+			}
+		}
+		throw( type = "Feeds.FetchError.TooManyRedirects", message = "More than #config.maxRedirects# redirects" )
+	}
+
+	private function open( required string target, required struct config, required numeric deadline ) {
+		if ( !reFindNoCase( "^https?://[^/\s]", arguments.target ) ) {
+			throw( type = "Feeds.FetchError", message = "Only http and https URLs can be fetched" )
+		}
+		var remaining = remainingMs( arguments.deadline )
+		var address = arguments.target
+		var connection = attempt( () => createObject( "java", "java.net.URI" ).init( address ).toURL().openConnection() )
+		connection.setInstanceFollowRedirects( false )
+		connection.setConnectTimeout( remaining )
+		connection.setReadTimeout( remaining )
+		connection.setRequestProperty( "User-Agent", arguments.config.userAgent )
+		connection.setRequestProperty( "Accept", static.ACCEPT )
+		connection.setRequestProperty( "Accept-Encoding", "gzip" )
+		if ( len( arguments.config.etag ?: "" ) ) {
+			connection.setRequestProperty( "If-None-Match", arguments.config.etag )
+		}
+		if ( len( arguments.config.lastModified ?: "" ) ) {
+			connection.setRequestProperty( "If-Modified-Since", arguments.config.lastModified )
+		}
+		return connection
+	}
+
+	/** The response body as bytes, gzip undone, given up on past maxBytes or the deadline. */
+	private function bodyOf( required connection, required numeric maxBytes, required numeric deadline ) {
+		var connection = arguments.connection
+		var limit = arguments.maxBytes
+		var until = arguments.deadline
+		if ( connection.getContentLengthLong() > limit ) {
+			tooLarge( limit )
+		}
+		return attempt( () => {
+			var stream = connection.getInputStream()
+			if ( lcase( connection.getContentEncoding() ?: "" ) == "gzip" ) {
+				stream = createObject( "java", "java.util.zip.GZIPInputStream" ).init( stream )
+			}
+			var body = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+			var chunk = createObject( "java", "java.nio.ByteBuffer" ).allocate( 16384 ).array()
+			try {
+				while ( true ) {
+					var count = stream.read( chunk )
+					if ( count < 0 ) {
+						break
+					}
+					body.write( chunk, 0, count )
+					if ( body.size() > limit ) {
+						tooLarge( limit )
+					}
+					remainingMs( until )
+				}
+			} finally {
+				stream.close()
+			}
+			return body.toByteArray()
+		} )
+	}
+
+	/** Milliseconds left before the deadline; Feeds.FetchError.Timeout when there are none. */
+	private numeric function remainingMs( required numeric deadline ) {
+		var remaining = arguments.deadline - getTickCount()
+		if ( remaining <= 0 ) {
+			throw( type = "Feeds.FetchError.Timeout", message = "The feed took too long to answer" )
+		}
+		return int( remaining )
+	}
+
+	private void function tooLarge( required numeric maxBytes ) {
+		throw( type = "Feeds.FetchError.TooLarge", message = "The feed is larger than #arguments.maxBytes# bytes" )
+	}
+
+	/** Runs a network call, turning what Java throws into Feeds.FetchError (a timeout into Feeds.FetchError.Timeout). */
+	private function attempt( required function call ) {
+		try {
+			return arguments.call()
+		} catch ( "Feeds.FetchError" e ) {
+			rethrow;
+		} catch ( any e ) {
+			var cause = isInstanceOf( e, "java.lang.Throwable" ) ? e : ( e.cause ?: javacast( "null", "" ) )
+			var depth = 0
+			var reason = e.message ?: ""
+			while ( !isNull( cause ) && depth < 10 ) {
+				if ( isInstanceOf( cause, "java.net.SocketTimeoutException" ) ) {
+					throw( type = "Feeds.FetchError.Timeout", message = "The feed took too long to answer" )
+				}
+				if ( isInstanceOf( cause, "java.io.IOException" ) ) {
+					reason = cause.getClass().getSimpleName() & ": " & ( cause.getMessage() ?: "" )
+				}
+				cause = cause.getCause()
+				depth++
+			}
+			throw( type = "Feeds.FetchError", message = "The feed couldn't be fetched", detail = reason )
+		}
+	}
+
+}

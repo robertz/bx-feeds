@@ -1,0 +1,30 @@
+/**
+ * bx-feeds: RSS, Atom and JSON Feed for BoxLang, parsed by ROME (jars in libs/).
+ * Settings go in boxlang.json under modules.bxFeeds.settings, or per call in
+ * the options of fetchFeed().
+ */
+class {
+
+	this.version     = "0.1.0";
+	this.mapping     = "bxFeeds";
+	this.author      = "Robert Zehnder";
+	this.description = "Fetches and parses RSS, Atom and JSON Feed into one normalized struct, with ROME.";
+	this.webURL      = "https://github.com/robertz/bx-feeds";
+	this.enabled     = true;
+
+	function configure() {
+		settings = {
+			userAgent      : "bx-feeds/#this.version# (+https://github.com/robertz/bx-feeds)",
+			timeoutSeconds : 20,
+			maxBytes       : 10485760,
+			maxRedirects   : 5
+		};
+	}
+
+	function onLoad() {
+	}
+
+	function onUnload() {
+	}
+
+}

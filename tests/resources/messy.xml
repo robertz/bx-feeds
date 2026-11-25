@@ -1,0 +1,36 @@
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+	<channel>
+		<title>Messy  </title>
+		<link>/</link>
+		<description></description>
+		<item>
+			<title>No guid, relative link</title>
+			<link>/posts/one</link>
+			<pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+			<description><![CDATA[<p>See <a href="two">two</a>, <a href='//cdn.messy.example/x.js'>cdn</a>, <a href="mailto:me@messy.example">mail</a>, <a href="#note">note</a>, <a href="has space.html">broken</a>.</p><video src="/v.mp4" poster="/p.jpg"></video> text href="not-a-tag"]]></description>
+			<enclosure url="media/one.mp3" type="audio/mpeg" length="oops"/>
+		</item>
+		<item>
+			<title>No guid, bad date</title>
+			<link>/posts/two</link>
+			<pubDate>yesterday afternoon</pubDate>
+			<description>&lt;p&gt;Escaped &amp;amp; fine&lt;/p&gt;</description>
+		</item>
+		<item>
+			<link>/posts/untitled</link>
+			<pubDate>Sun, 01 Nov 2026 00:00:00 GMT</pubDate>
+		</item>
+		<item>
+			<description>Nothing but words</description>
+		</item>
+		<item>
+			<title>Empty guid</title>
+			<guid>   </guid>
+			<link>/posts/three</link>
+			<pubDate>2026-11-01T05:00:00Z</pubDate>
+		</item>
+	</channel>
+</rss>

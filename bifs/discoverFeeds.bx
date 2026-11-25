@@ -1,0 +1,14 @@
+/**
+ * The feeds a page advertises with <link rel="alternate">, as absolute URLs.
+ *
+ *   feeds = discoverFeeds( html, "https://example.com/blog/" )
+ *   // [ { url, type, title } ]
+ */
+@BoxBIF
+class {
+
+	function invoke( required string html, string baseUrl = "" ) {
+		return new bxModules.bxFeeds.models.FeedDiscovery().discover( arguments.html, arguments.baseUrl )
+	}
+
+}
