@@ -1,5 +1,18 @@
 # Changelog
 
+**0.4.0**
+- `findFeeds()`: the feeds behind a pasted address. The address itself, the
+  feeds its page advertises, a known site pattern (Reddit, GitHub, Mastodon)
+  or a common path, each fetched and parsed, within a time budget.
+- `webSub()`: subscribe to and unsubscribe from a feed's hub, read the hub's
+  check, and verify a push's `X-Hub-Signature`.
+- More of a podcast. On the feed: `author`, `owner`, `type`, `explicit`,
+  `complete`, `newFeedUrl`, `categories`, `guid`, `locked`, `medium`,
+  `location`, `value` and `liveItems`. On an item: `season`, `episode`,
+  `episodeType`, `explicit`, `location` and `value`.
+- `fetchFeed()` takes an `accept` option, and `FeedFetcher.postForm()` posts
+  a form with the same address checks as a fetch.
+
 **0.3.0**
 - `httpOnly` option: every returned URL that isn't http(s) is blanked, or
   dropped with its entry when it's in a list.

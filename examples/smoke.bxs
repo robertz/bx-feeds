@@ -1,7 +1,8 @@
 /**
- * The BIFs end to end, with no network: a feed is parsed, a page's feeds
- * are discovered, and a feed is fetched twice from a server this script starts
- * on a free local port (the second time it hasn't changed).
+ * The BIFs end to end, with no network: a feed is parsed, a page's feeds are
+ * discovered, a feed is fetched twice and found from its page on a server this
+ * script starts on a free local port, an OPML list is written and read, and a
+ * WebSub signature is checked.
  *   boxlang examples/smoke.bxs        with bx-feeds in ./boxlang_modules or BoxLang HOME
  */
 rss = '<?xml version="1.0"?>
@@ -30,6 +31,14 @@ for ( found in discoverFeeds( page, "https://example.com/blog/" ) ) {
 // this machine, which fetchFeed() refuses unless it's told that's fine.
 httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( createObject( "java", "java.net.InetSocketAddress" ).init( "127.0.0.1", 0 ), 0 )
 httpServer.createContext( "/", ( exchange ) => {
+	if ( exchange.getRequestURI().getPath() == "/blog" ) {
+		var html = page.getBytes( "UTF-8" )
+		exchange.getResponseHeaders().set( "Content-Type", "text/html" )
+		exchange.sendResponseHeaders( 200, javacast( "long", arrayLen( html ) ) )
+		exchange.getResponseBody().write( html )
+		exchange.close()
+		return
+	}
 	exchange.getResponseHeaders().set( "ETag", '"smoke-1"' )
 	if ( ( exchange.getRequestHeaders().getFirst( "If-None-Match" ) ?: "" ) == '"smoke-1"' ) {
 		exchange.sendResponseHeaders( 304, javacast( "long", -1 ) )
@@ -47,6 +56,10 @@ try {
 	println( "Fetched: #first.status#, etag #first.etag#, #first.feed.items.len()# items, first link #first.feed.items[ 1 ].link#" )
 	second = fetchFeed( feedUrl, { etag: first.etag, lastModified: first.lastModified, allowPrivateAddresses: true } )
 	println( "Again: #second.status#, not modified: #second.notModified#" )
+	// the page at /blog advertises /feed.xml; findFeeds() fetches both to be sure
+	for ( found in findFeeds( "http://127.0.0.1:#httpServer.getAddress().getPort()#/blog", { allowPrivateAddresses: true } ) ) {
+		println( "Found #found.title# at #found.url# (#found.source#)" )
+	}
 } finally {
 	httpServer.stop( 0 )
 }
@@ -56,7 +69,13 @@ xml = toOpml( [ { title: "News", outlines: [ { title: feed.title, feedUrl: "http
 list = parseOpml( xml )
 println( "OPML '#list.title#': #list.outlines[ 1 ].title# > #list.outlines[ 1 ].outlines[ 1 ].feedUrl#" )
 
-// 5. What can't be read, or mustn't be fetched, is a typed error.
+// 5. A WebSub push counts only when it's signed with the subscription's secret.
+hub = webSub()
+secret = hub.newSecret()
+signature = "sha256=" & lcase( hmac( rss, secret, "HmacSHA256", "UTF-8" ) )
+println( "Push signed: #hub.isSigned( rss, signature, secret )#, forged: #hub.isSigned( rss, signature, hub.newSecret() )#" )
+
+// 6. What can't be read, or mustn't be fetched, is a typed error.
 try {
 	fetchFeed( "http://127.0.0.1/feed.xml" )
 } catch ( "Feeds.FetchError" e ) {

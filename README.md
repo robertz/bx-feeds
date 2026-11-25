@@ -1,6 +1,6 @@
 # bx-feeds
 
-RSS, Atom, JSON Feed and OPML for BoxLang, built for feed readers. `fetchFeed()` gets a feed with a conditional GET, `parseFeed()` turns it into one plain struct whatever the format, `discoverFeeds()` finds the feeds a web page advertises, and `parseOpml()` / `toOpml()` read and write subscription lists. XML is parsed by [ROME](https://rometools.github.io/rome/), the Java feed library; the module adds what a reader needs on top of it.
+RSS, Atom, JSON Feed and OPML for BoxLang, built for feed readers. `fetchFeed()` gets a feed with a conditional GET, `parseFeed()` turns it into one plain struct whatever the format, `findFeeds()` turns a pasted address into the feeds behind it, `parseOpml()` / `toOpml()` read and write subscription lists, and `webSub()` subscribes to a feed's hub so new posts are pushed to you. XML is parsed by [ROME](https://rometools.github.io/rome/), the Java feed library; the module adds what a reader needs on top of it.
 
 - RSS 0.9x, 1.0 (RDF) and 2.0, Atom 0.3 and 1.0, and JSON Feed 1.0 and 1.1, all returned in the same shape.
 - Every item has a **stable id** to dedupe on, even when the feed gives none.
@@ -8,7 +8,7 @@ RSS, Atom, JSON Feed and OPML for BoxLang, built for feed readers. `fetchFeed()`
 - Relative URLs in links, enclosures and HTML content come back absolute.
 - Fetching sends `If-None-Match` / `If-Modified-Since`, follows redirects and tells you which were permanent, stops at a timeout and a maximum size, and refuses private network addresses.
 - What a reader schedules and subscribes with: the feed's own address, WebSub hubs, the next page, `<ttl>` and skip hours, `Retry-After`.
-- Podcasts and video: durations, artwork, Media RSS thumbnails, and Podcasting 2.0 transcripts, chapters, people and funding.
+- Podcasts and video: durations, artwork, seasons and episodes, Media RSS thumbnails, and Podcasting 2.0 transcripts, chapters, people, funding, value and live items.
 - No DTD is ever read, so XXE and entity-expansion attacks don't work. See [Security](#security).
 - Real feeds are messy: whitespace before `<?xml`, a wrong declared encoding, UTF-8 encoded twice, an attribute repeated on the root element, HTML entities, an old DOCTYPE, a missing guid and a date in the wrong format are all read through.
 
@@ -18,7 +18,7 @@ Requires BoxLang **1.19+** (Java 21). The module ships its jars in `libs/`: ROME
 
 bx-compat-cfml's `new feed()` is a thin shim over a `bx:feed` component that the compat module doesn't contain; that component comes from Ortus's [bx-rss](https://github.com/ortus-boxlang/bx-rss), which also has an `rss()` BIF. bx-rss is a `cffeed` replacement: it reads a feed from a URL or a file into a query or an items array, understands iTunes and Media RSS tags, and can *create* feeds.
 
-bx-feeds doesn't create feeds. It does the things a reader polls with, which bx-rss's documentation doesn't offer: conditional GET, a size limit, permanent-redirect reporting, parsing from a string or bytes you fetched yourself, JSON Feed, stable item ids, relative URL resolution, repairs for broken feeds, polling hints, Podcasting 2.0 tags, OPML, feed autodiscovery, and tested protection against XML attacks. Use bx-rss to port `cffeed` code or publish a feed; use bx-feeds to subscribe to other people's.
+bx-feeds doesn't create feeds. It does the things a reader polls with, which bx-rss's documentation doesn't offer: conditional GET, a size limit, permanent-redirect reporting, parsing from a string or bytes you fetched yourself, JSON Feed, stable item ids, relative URL resolution, repairs for broken feeds, polling hints, Podcasting 2.0 tags, OPML, finding a site's feeds, WebSub, and tested protection against XML attacks. Use bx-rss to port `cffeed` code or publish a feed; use bx-feeds to subscribe to other people's.
 
 ## Install
 
@@ -95,7 +95,7 @@ It returns:
 	hubs        : [ "https://hub.example/" ],      // WebSub
 	nextUrl     : "https://example.com/feed.xml?page=2",
 	poll        : { minutes: 180, skipHours: [ 3, 4 ], skipDays: [ "sunday" ] },
-	podcast     : { persons: [ { name, role, url, image } ], funding: [ { url, label } ] },
+	podcast     : { author, owner, type, explicit, categories, persons, funding, ... },  // see Podcasts
 	items       : [ {
 		id          : "tag:example.com,2026:hello",
 		title       : "Hello, world",
@@ -110,12 +110,7 @@ It returns:
 		commentsUrl : "https://example.com/hello#comments",
 		image       : "https://example.com/hello.jpg",
 		durationSeconds : 2710,
-		podcast     : {
-			transcripts : [ { url, type } ],
-			chaptersUrl : "https://example.com/hello.chapters.json",
-			persons     : [ { name, role, url, image } ],
-			soundbites  : [ { startTime, duration, title } ]
-		}
+		podcast     : { season, episode, episodeType, explicit, transcripts, chaptersUrl, persons, ... }  // see Podcasts
 	} ]
 }
 ```
@@ -128,7 +123,6 @@ Every key is always there, whatever the format. Text that's missing is `""`, a l
 - `hubs` are its WebSub hubs (`rel="hub"`, JSON `hubs`). `nextUrl` is the page of older entries: RFC 5005's `rel="next"`, else `rel="prev-archive"`, or JSON `next_url`.
 - `poll.minutes` is how often the publisher says to check: RSS `<ttl>`, else `sy:updatePeriod` over `sy:updateFrequency`. `skipHours` (0 to 23, UTC) and `skipDays` (lowercase names) are RSS's. They are hints; a schedule that skips every hour or every day is ignored.
 - `image` is a podcast's `itunes:image` when it has one, else the RSS `<image>`, the Atom logo or icon, or the JSON Feed icon.
-- `podcast.persons` and `podcast.funding` are the channel's `podcast:person` and `podcast:funding`. A `role` that isn't given is `"host"`.
 
 **An item**
 
@@ -140,7 +134,44 @@ Every key is always there, whatever the format. Text that's missing is `""`, a l
 - `commentsUrl` is RSS `<comments>`, or an Atom `rel="replies"` link to a page.
 - `image` is the episode's `itunes:image`, else a Media RSS thumbnail or image, or JSON `image` / `banner_image`. Pictures inside the content aren't looked at.
 - `durationSeconds` is from `itunes:duration` (`2710`, `45:10` or `0:45:10`) or a JSON attachment's `duration_in_seconds`. A day or more is taken as a typo and returned as 0.
-- `podcast` holds Podcasting 2.0's `podcast:transcript` (all of them, in feed order), `podcast:chapters`, `podcast:person` and `podcast:soundbite`.
+
+**Podcasts.** Every feed and every item has a `podcast` struct with the same keys, empty when the feed isn't a podcast. iTunes tags and [Podcasting 2.0](https://podcastindex.org/namespace/1.0) tags are read into it:
+
+```js
+feed.podcast = {
+	author     : "Example Media",                       // itunes:author
+	owner      : { name: "Olive Owner", email: "olive@example.com" },
+	type       : "episodic",                            // or "serial": play oldest first
+	explicit   : false,
+	complete   : false,                                 // true: no more episodes are coming
+	newFeedUrl : "",                                    // itunes:new-feed-url: the show has moved here
+	categories : [ "Technology", "Technology > Tech News" ],
+	guid       : "917393e3-1b1e-5cef-ace4-edaa54e1f810", // podcast:guid, the same in every copy of the feed
+	locked     : true,                                  // podcast:locked: don't import this feed elsewhere
+	medium     : "podcast",                             // or music, video, audiobook, newsletter...
+	location   : { name: "Austin, TX", geo: "geo:30.2672,97.7431", osm: "R113314" },
+	persons    : [ { name: "Ada Host", role: "host", url: "", image: "" } ],
+	funding    : [ { url: "https://example.com/support", label: "Support the show" } ],
+	value      : { type: "lightning", method: "keysend", suggested: 0.00000005,
+	               recipients: [ { name, type, address, split, fee, customKey, customValue } ] },
+	liveItems  : [ { status: "live", start, end, id, title, link, enclosures, contentLinks: [ { url, label } ] } ]
+}
+
+item.podcast = {
+	season      : 2,                                    // 0 when the episode doesn't say
+	episode     : 5,
+	episodeType : "full",                               // or "trailer", "bonus"
+	explicit    : false,
+	transcripts : [ { url: "https://example.com/5.vtt", type: "text/vtt" } ],  // all of them, in feed order
+	chaptersUrl : "https://example.com/5.chapters.json",
+	persons     : [ { name: "Grace Guest", role: "guest", url: "", image: "" } ],
+	soundbites  : [ { startTime: 73.5, duration: 60, title: "The best minute" } ],
+	location    : { name: "", geo: "", osm: "" },
+	value       : { type: "", method: "", suggested: 0, recipients: [] }
+}
+```
+
+A person's `role` is `"host"` when the feed doesn't give one. `season` and `episode` come from `podcast:season` and `podcast:episode` when the feed has them, else from the iTunes tags. A live item's `start` and `end` are UTC datetimes or null; live items are not in `items`. An item's `persons`, `location` and `value` are its own: when they're empty, the show's apply.
 
 **Dates.** ROME reads RFC 822 and ISO 8601 dates. A date in neither is tried against a list of formats seen in real feeds: full day and month names, `2026-11-02 10:00:00` with or without an offset, `November 2, 2026 3:15 PM`, a day alone, C's `asctime`, and a few more. One without a zone is taken as UTC. Anything else is null.
 
@@ -200,16 +231,38 @@ if ( result.notModified ) {
 
 Only `http` and `https` are fetched, and redirects to anything else are refused. Gzip is asked for and undone. Every address on the way, the first and each redirect's, must be a public one unless `allowPrivateAddresses` is set.
 
-### Discovering feeds
+### Finding a site's feeds
 
-`discoverFeeds( html, baseUrl = "" )` returns the feeds a page links with `<link rel="alternate">`, in page order, with repeats dropped:
+`findFeeds( pageUrl, options = {} )` is for an "add a feed" box: give it whatever was pasted and it returns the feeds behind it, each one fetched and parsed to make sure.
+
+```js
+findFeeds( "example.com/blog", { userAgent: "Feedhouse/1.0 (+https://feedhouse.app)" } )
+// [ { url: "https://example.com/feed.xml", title: "Example Blog", link: "https://example.com/", type: "rss_2.0", source: "advertised" } ]
+```
+
+It tries four things in order, and the first that finds anything ends the search:
+
+| `source` | What |
+|---|---|
+| `itself` | The address is already a feed. |
+| `advertised` | The feeds its page links with `<link rel="alternate">`: up to five, every one that really is a feed. |
+| `pattern` | A site whose feed address follows from the page's: a Reddit subreddit or user, a GitHub repository (its releases) or user, a Mastodon profile or hashtag. |
+| `path` | The paths feeds usually live at (`/feed`, `/rss`, `/feed.xml`, `/rss.xml`, `/atom.xml`, `/index.xml`, `/feed.json` and two more), stopping at the first that works. |
+
+An address without a scheme is taken as `https://`. A feed's `url` is the one asked for, unless the server said it has permanently moved. Nothing found is an empty array. A page that can't be reached at all throws `Feeds.FetchError`; a candidate that can't is skipped.
+
+`options` takes everything `fetchFeed()` does, applied to every request, plus `budgetSeconds` (60 by default): the longest the whole search may take. At worst it makes about sixteen requests, all to the site you named or to addresses its page gave, each held to the same limits and the same private-address check as any fetch.
+
+### Discovering feeds in a page you have
+
+`discoverFeeds( html, baseUrl = "" )` is the step of `findFeeds()` that reads the page, for when you fetched it yourself. It returns the feeds the page links with `<link rel="alternate">`, in page order, with repeats dropped:
 
 ```js
 discoverFeeds( html, "https://example.com/blog/" )
 // [ { url: "https://example.com/feed.xml", type: "application/rss+xml", title: "Posts" } ]
 ```
 
-It recognizes `application/rss+xml`, `application/atom+xml`, `application/feed+json` and `application/json`, and honors a `<base href>` in the page. It reads the tags with a pattern rather than an HTML parser, which is enough for `<link>` tags. It doesn't fetch the page or guess at addresses like `/feed`.
+It recognizes `application/rss+xml`, `application/atom+xml`, `application/feed+json` and `application/json`, and honors a `<base href>` in the page. It reads the tags with a pattern rather than an HTML parser, which is enough for `<link>` tags. It makes no requests, so nothing it returns has been checked.
 
 ### OPML
 
@@ -231,6 +284,39 @@ An outline with a `feedUrl` is a subscription. One without is a folder, and its 
 xml = toOpml( [ { title: "News", outlines: [ { title: "Daily", feedUrl: "https://news.example/rss" } ] } ], "My feeds" )
 ```
 
+### WebSub
+
+A feed with a hub (`feed.hubs`) can push new posts to you the moment they're published, instead of you polling for them. `webSub( overrides = {} )` returns the subscriber's side of [WebSub](https://www.w3.org/TR/websub/) (and PubSubHubbub before it). You keep the state and serve the callback address; it does the protocol. There are three moments:
+
+```js
+hub = webSub()
+
+// 1. Ask the hub to push. Keep the secret with the subscription.
+secret = hub.newSecret()
+answer = hub.subscribe( feed.hubs[ 1 ], feed.feedUrl, "https://example.com/websub/#token#", { secret: secret } )
+// { accepted: true, status: 202, body: "" }
+
+// 2. The hub checks with a GET to your callback. Echo its challenge, or refuse.
+check = hub.challenge( queryParams, feed.feedUrl )
+// { mode: "subscribe", accepted: true, challenge: "...", leaseSeconds: 864000, reason: "" }
+if ( check.accepted ) {
+	// reply 200 with check.challenge as the body; you're subscribed for check.leaseSeconds
+} else {
+	// reply 404; when check.mode is "denied" the hub refused, and check.reason says why
+}
+
+// 3. The hub POSTs new content to your callback. Reply 2xx either way; use it only if it's signed.
+if ( hub.isSigned( rawBody, headers[ "X-Hub-Signature" ], secret ) ) {
+	feed = parseFeed( rawBody, { baseUrl: feedUrl } )
+}
+```
+
+- `subscribe( hubUrl, topicUrl, callbackUrl, options )`: the topic is the feed's own address, its `feedUrl`. `options.leaseSeconds` (10 days by default) is a request; the hub decides, and tells you in step 2. Renew before the lease runs out by subscribing again. `unsubscribe( hubUrl, topicUrl, callbackUrl )` asks the hub to stop; it checks that the same way, with mode `"unsubscribe"`, and `accepted` only says the request is well-formed: agree only if you really want to stop.
+- Put something unguessable in each callback address (the `token` above) so you can tell which subscription a request is for, and so nobody else can find it.
+- `isSigned( body, signature, secret )` takes the body exactly as it arrived, as bytes or a string, and the `X-Hub-Signature` header (`sha1=`, `sha256=`, `sha384=` or `sha512=` and a hex HMAC). It compares in constant time. Without a secret nothing counts as signed, so always subscribe with one.
+- Requests to the hub use the module's `userAgent` and `timeoutSeconds`, don't follow redirects, and refuse private addresses unless `allowPrivateAddresses` is set. Pass overrides to `webSub( { ... } )`.
+- A pushed body may hold only the new items, so merge it into what you have rather than replacing it. Keep polling too, less often: hubs fail quietly.
+
 ### Errors
 
 | Type | When |
@@ -246,18 +332,20 @@ xml = toOpml( [ { title: "News", outlines: [ { title: "Daily", feedUrl: "https:/
 
 ### The models
 
-The BIFs are thin wrappers over four classes you can also use directly:
+The BIFs are thin wrappers over six classes you can also use directly:
 
 ```js
 parser    = new bxModules.bxFeeds.models.FeedParser()                       // .parse( input, options )
 fetcher   = new bxModules.bxFeeds.models.FeedFetcher( { userAgent: "Mine/1.0" } )  // .fetch( feedUrl, options )
 discovery = new bxModules.bxFeeds.models.FeedDiscovery()                    // .discover( html, baseUrl )
+finder    = new bxModules.bxFeeds.models.FeedFinder( { userAgent: "Mine/1.0" } )   // .find( pageUrl, options )
 opml      = new bxModules.bxFeeds.models.Opml()                             // .parse( input ), .build( list, title )
+hub       = new bxModules.bxFeeds.models.WebSub()                           // .subscribe(), .unsubscribe(), .challenge(), .isSigned()
 ```
 
 ### Runnable example
 
-`examples/smoke.bxs` parses a feed, discovers one, fetches one twice from a server it starts on a free local port, and writes and reads an OPML list:
+`examples/smoke.bxs` parses a feed, fetches one twice and finds one from a page, all from a server it starts on a free local port, writes and reads an OPML list, and checks a WebSub signature:
 
 ```bash
 boxlang examples/smoke.bxs
@@ -273,15 +361,18 @@ boxlang examples/smoke.bxs
 
 **Private addresses.** `fetchFeed()` refuses an address that isn't on the public internet: loopback, private and link-local ranges (including cloud metadata at `169.254.169.254`), carrier-grade NAT, reserved ranges, and IPv6 forms that carry or tunnel to one of those. The check is made for the first address and for every redirect. It resolves the host and then connects, relying on the JVM's DNS cache (30 seconds by default) to connect to what it checked; if you've turned that cache off, a hostile DNS server could answer differently the second time, and an egress proxy is the stronger defense.
 
+**WebSub.** Anyone who learns a callback address can POST to it. Treat a push as a feed from a stranger: accept it only when `isSigned()` says so, which needs a secret at subscribe time, and parse it with the same care as any other. Give each subscription its own secret and its own unguessable callback.
+
 **Limits.** `timeoutSeconds` bounds the whole fetch, so a server that trickles bytes can't hold a worker. `maxBytes` is counted after decompression, so a gzip bomb is cut off too. When you parse a document you got some other way, `maxLength` and `maxItems` do the same job for `parseFeed()`.
 
 ## Not yet
 
-- The rest of iTunes and Media RSS (explicit flags, seasons and episode numbers, keywords, ratings, credits) and of Podcasting 2.0 (value, location, live items).
+- The rest of Media RSS (ratings, credits, keywords) and of Podcasting 2.0 (value time splits, trailers, licenses, `podcast:txt`, remote items).
 - Picking a transcript or an enclosure for you, and taking an item's image from its content: those are a reader's choices.
 - Dates in other languages, and ambiguous ones like `02/11/2026`.
 - Fallback User-Agents, remembering a site's 429s, and telling a bot check from a refusal.
-- Probing a site for feeds it doesn't advertise (`/feed`, `/rss.xml`).
+- More site patterns for `findFeeds()` (YouTube handles, Substack, Medium).
+- Publishing to a hub, and storing WebSub subscriptions: the module does the protocol, the state is yours.
 - Polling, scheduling, HTML sanitizing and full-text extraction belong in the app or another module, not here.
 
 ## Dependencies
