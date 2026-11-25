@@ -3,8 +3,9 @@
  * into one struct shape:
  *
  *   feed = new bxModules.bxFeeds.models.FeedParser().parse( bytes, { baseUrl: "https://example.com/feed.xml" } )
- *   // { type, title, link, description, language, updated, image, items: [
- *   //   { id, title, link, published, updated, authors, summary, contentHtml, categories, enclosures } ] }
+ *   // { type, title, link, feedUrl, description, language, updated, image, hubs, nextUrl, poll, podcast, items: [
+ *   //   { id, title, link, published, updated, authors, summary, contentHtml, categories, enclosures,
+ *   //     commentsUrl, image, durationSeconds, podcast } ] }
  *
  * Dates are BoxLang datetimes in UTC, or null. HTML is returned as the feed gave
  * it, only with relative URLs made absolute: sanitize it before showing it.
@@ -17,14 +18,48 @@ class {
 		// the DOCTYPE, internal subset and all, when it comes before the root element
 		DOCTYPE = REGEX.compile( "(?is)^((?:\s|<\?.*?\?>|<!--.*?-->)*)<!DOCTYPE[^\[>]*(?:\[.*?\]\s*)?>" )
 		TAG = REGEX.compile( "<[A-Za-z][^>]*>" )
-		URL_ATTRIBUTE = REGEX.compile( "(?i)(\s(?:href|src|poster)\s*=\s*)(""|')(.*?)\2" )
+		URL_ATTRIBUTE = REGEX.compile( "(?i)(\s(href|src|poster|srcset|style)\s*=\s*)(""|')(.*?)\3" )
+		CSS_URL = REGEX.compile( "(?i)(url\(\s*)(&quot;|&##39;|[""']?)(.*?)\2(\s*\))" )
 		SCHEME = REGEX.compile( "^[A-Za-z][A-Za-z0-9+.-]*:" )
 		LATIN = REGEX.compile( "(?i)^(ISO-8859-1|windows-1252|US-ASCII)$" )
+		ROOT = REGEX.compile( "<(rss|feed|rdf:RDF)(\s[^>]*?)(/?)>" )
+		ROOT_ATTRIBUTE = REGEX.compile( "([A-Za-z_][\w:.-]*)\s*=\s*(""[^""]*""|'[^']*')" )
+		SKIP_SCHEDULE = REGEX.compile( "(?is)<(skipHours|skipDays)\b[^>]*>.*?</\1\s*>" )
+		DATE_ELEMENT = REGEX.compile( "<((?:[A-Za-z]+:)?(?:pubDate|lastBuildDate|date|updated|published|modified|issued|created))(\s[^>]*)?>([^<]{1,100})</\1\s*>" )
+		// a double-encoded character arrives as its UTF-8 bytes, read as Latin-1: one run per character,
+		// sized by its lead byte, the continuation bytes landing in the C1 controls real text never holds
+		C1_CONTROL = REGEX.compile( "[\u0080-\u009F]" )
+		DOUBLE_ENCODED = REGEX.compile( "[\u00C2-\u00DF][\u0080-\u00BF]|[\u00E0-\u00EF][\u0080-\u00BF]{2}|[\u00F0-\u00F4][\u0080-\u00BF]{3}" )
+		EMAIL_NAME = REGEX.compile( "^\S+@\S+\s*\((.+)\)$" )
 		ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+		MEDIA = "http://search.yahoo.com/mrss/"
+		ATOM = "http://www.w3.org/2005/Atom"
+		SYNDICATION = "http://purl.org/rss/1.0/modules/syndication/"
+		// Podcasting 2.0; early adopters used the GitHub address before the namespace settled
+		PODCAST = [ "https://podcastindex.org/namespace/1.0", "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md" ]
+		PERIOD_MINUTES = { hourly: 60, daily: 1440, weekly: 10080, monthly: 43200, yearly: 525600 }
+		DAYS = [ "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" ]
 		UTC = createObject( "java", "java.time.ZoneOffset" ).UTC
+		US = createObject( "java", "java.util.Locale" ).US
+		// tried in order on a date ROME can't read; one without a zone is taken as UTC
+		DATE_FORMATS = [
+			"EEEE, d MMMM yyyy HH:mm:ss z", "EEEE, d MMMM yyyy HH:mm:ss Z", "EEE, d MMMM yyyy HH:mm:ss z", "EEE, d MMMM yyyy HH:mm:ss Z",
+			"EEEE, d MMM yyyy HH:mm:ss z", "EEEE, d MMM yyyy HH:mm:ss Z", "EEE MMM d HH:mm:ss z yyyy", "EEE MMM d HH:mm:ss yyyy",
+			"yyyy-MM-dd HH:mm:ss Z", "yyyy-MM-dd HH:mm:ss z", "yyyy-MM-dd HH:mm:ssXXX", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy/MM/dd HH:mm:ss",
+			"EEE, d MMM yyyy HH:mm:ss", "EEE, d MMM yyyy HH:mm", "d MMM yyyy HH:mm:ss", "MMMM d, yyyy h:mm a", "MMM d, yyyy h:mm a", "MMMM d, yyyy HH:mm",
+			"EEE, d MMM yyyy", "MMMM d, yyyy", "MMM d, yyyy", "d MMMM yyyy", "d MMM yyyy", "yyyy/MM/dd"
+		].map( ( mask ) => createObject( "java", "java.time.format.DateTimeFormatterBuilder" ).init().parseCaseInsensitive().appendPattern( mask ).toFormatter( createObject( "java", "java.util.Locale" ).ENGLISH ) )
 	}
 
 	function init() {
+		// ROME's Media RSS and iTunes parsers log a warning with a stack trace for each tag they skip
+		// (an empty <media:content/>, say); the item still parses, so only their errors are kept
+		try {
+			createObject( "java", "org.slf4j.LoggerFactory" ).getLogger( "com.rometools.modules" )
+				.setLevel( createObject( "java", "ch.qos.logback.classic.Level" ).ERROR )
+		} catch ( any e ) {
+			// not Logback underneath: the warnings stay, nothing else changes
+		}
 		return this
 	}
 
@@ -35,15 +70,15 @@ class {
 	 */
 	struct function parse( required input, struct options = {} ) {
 		var baseUrl = trim( arguments.options.baseUrl ?: "" )
-		var text = textOf( arguments.input, arguments.options.contentType ?: "" )
+		var text = documentText( arguments.input, arguments.options.contentType ?: "" )
 		if ( left( text, 1 ) == "{" ) {
 			return fromJson( text, baseUrl )
 		}
 		return fromXml( text, baseUrl )
 	}
 
-	/** The document as text: a string as it is, a file's or a response's bytes decoded. */
-	private string function textOf( required input, required string contentType ) {
+	/** The document as text: a string as it is, a file's or a response's bytes decoded. Throws Feeds.ParseError. */
+	string function documentText( required input, string contentType = "" ) {
 		var given = arguments.input
 		if ( isSimpleValue( given ) && !isBinary( given ) ) {
 			var head = startOf( toString( given ) )
@@ -108,53 +143,193 @@ class {
 			.decode( createObject( "java", "java.nio.ByteBuffer" ).wrap( arguments.bytes ) ).toString()
 	}
 
+	/** The XML without its DOCTYPE, so no DTD is ever read; the parsers refuse any DOCTYPE that's left. */
+	string function withoutDoctype( required string text ) {
+		return static.DOCTYPE.matcher( arguments.text ).replaceFirst( "$1" )
+	}
+
 	private struct function fromXml( required string text, required string baseUrl ) {
-		var input = createObject( "java", "com.rometools.rome.io.SyndFeedInput" ).init()
-		// no DTD is ever read: the DOCTYPE is cut out first (old RSS 0.91 feeds carry one), and the parser
-		// refuses any that's left, so entities a DTD would define (XXE, entity bombs) are simply undefined
-		input.setAllowDoctypes( false )
-		// the RSS <guid> is only on the item ROME read, see idOf()
-		input.setPreserveWireFeed( true )
-		var synd = ""
-		try {
-			synd = input.build( createObject( "java", "java.io.StringReader" ).init( static.DOCTYPE.matcher( arguments.text ).replaceFirst( "$1" ) ) )
-		} catch ( any e ) {
-			unreadable( "That isn't a readable RSS or Atom feed", e.message ?: "" )
-		}
+		var synd = built( readableDates( repairedEncoding( withoutDoctype( arguments.text ) ) ) )
 		var type = synd.getFeedType() ?: ""
+		var isAtom = type.startsWith( "atom" )
 		var link = resolveUrl( siteLinkOf( synd ), arguments.baseUrl )
 		// Atom's relative URLs are relative to the document, RSS's by convention to the channel's link
-		var base = type.startsWith( "atom" ) && len( arguments.baseUrl ) ? arguments.baseUrl : ( isAbsolute( link ) ? link : arguments.baseUrl )
+		var base = isAtom && len( arguments.baseUrl ) ? arguments.baseUrl : ( isAbsolute( link ) ? link : arguments.baseUrl )
+		var links = feedLinks( synd, base )
 		var image = synd.getImage() ?: synd.getIcon()
 		var imageUrl = isNull( image ) ? "" : trim( image.getUrl() ?: "" )
-		// a podcast's artwork; ROME leaves itunes: tags as foreign markup without its modules jar
-		for ( var element in synd.getForeignMarkup() ) {
-			if ( !len( imageUrl ) && element.getName() == "image" && element.getNamespaceURI() == static.ITUNES ) {
-				imageUrl = trim( element.getAttributeValue( "href" ) ?: "" )
-			}
+		var show = synd.getModule( static.ITUNES )
+		if ( !isNull( show ) && len( trim( show.getImageUri() ?: "" ) ) ) {
+			// a podcast's square artwork is the picture its listeners know
+			imageUrl = trim( show.getImageUri() )
 		}
+		var extras = podcastOf( synd.getForeignMarkup(), base )
 		var items = []
 		for ( var entry in synd.getEntries() ) {
-			items.append( itemOf( entry, type, base ) )
+			items.append( itemOf( entry, isAtom, type, base ) )
 		}
 		return {
 			type        : type,
-			title       : trim( synd.getTitle() ?: "" ),
+			title       : titleOf( synd.getTitleEx(), synd.getTitle() ?: "" ),
 			link        : link,
+			feedUrl     : links.self,
 			description : trim( synd.getDescription() ?: "" ),
 			language    : trim( synd.getLanguage() ?: "" ),
 			updated     : utc( synd.getPublishedDate() ),
 			image       : resolveUrl( imageUrl, base ),
+			hubs        : links.hubs,
+			nextUrl     : links.next,
+			poll        : pollOf( synd ),
+			podcast     : { persons: extras.persons, funding: extras.funding },
 			items       : items
 		}
 	}
 
-	private struct function itemOf( required entry, required string type, required string base ) {
-		var rawLink = trim( arguments.entry.getLink() ?: "" )
-		var link = resolveUrl( rawLink, arguments.base )
+	/**
+	 * ROME's feed from the XML. When it's refused, two repairs are tried in turn,
+	 * each on top of the last: an attribute repeated on the root element, and a
+	 * <skipHours> or <skipDays> ROME won't take.
+	 */
+	private function built( required string text ) {
+		var reason = ""
+		var attempts = [ arguments.text ]
+		var repaired = withoutRepeatedRootAttributes( arguments.text )
+		attempts.append( repaired )
+		attempts.append( static.SKIP_SCHEDULE.matcher( repaired ).replaceAll( "" ) )
+		for ( var i = 1; i <= attempts.len(); i++ ) {
+			if ( i > 1 && attempts[ i ] == attempts[ i - 1 ] ) {
+				continue
+			}
+			try {
+				var input = createObject( "java", "com.rometools.rome.io.SyndFeedInput" ).init()
+				// no DTD is ever read: the DOCTYPE was cut out (old RSS 0.91 feeds carry one), and the parser
+				// refuses any that's left, so entities a DTD would define (XXE, entity bombs) are simply undefined
+				input.setAllowDoctypes( false )
+				// the RSS <guid>, <ttl> and skip schedule are only on the feed as ROME read it
+				input.setPreserveWireFeed( true )
+				return input.build( createObject( "java", "java.io.StringReader" ).init( attempts[ i ] ) )
+			} catch ( any e ) {
+				if ( !len( reason ) ) {
+					reason = e.message ?: ""
+				}
+			}
+		}
+		unreadable( "That isn't a readable RSS or Atom feed", reason )
+	}
+
+	/**
+	 * Sites running two podcast plugins declare xmlns:itunes (or version) twice on
+	 * <rss>, which XML forbids. The first of each attribute on the root element is kept.
+	 */
+	private string function withoutRepeatedRootAttributes( required string text ) {
+		var root = static.ROOT.matcher( arguments.text )
+		if ( !root.find() ) {
+			return arguments.text
+		}
+		var attributes = static.ROOT_ATTRIBUTE.matcher( root.group( 2 ) )
+		// a Java set: XML names are case-sensitive, BoxLang struct keys aren't
+		var seen = createObject( "java", "java.util.HashSet" ).init()
+		var kept = []
+		var dropped = false
+		while ( attributes.find() ) {
+			if ( seen.contains( attributes.group( 1 ) ) ) {
+				dropped = true
+			} else {
+				seen.add( attributes.group( 1 ) )
+				kept.append( attributes.group( 0 ) )
+			}
+		}
+		if ( !dropped ) {
+			return arguments.text
+		}
+		return arguments.text.substring( 0, root.start() ) & "<" & root.group( 1 ) & " " & kept.toList( " " ) & root.group( 3 ) & ">" & arguments.text.substring( root.end() )
+	}
+
+	/**
+	 * Puts back the characters of a feed that encoded its UTF-8 twice ("â" and two
+	 * invisible controls for an apostrophe). Only a document holding C1 controls,
+	 * which real text never does, is touched; a run that isn't a character's
+	 * bytes after all is left as it is.
+	 */
+	private string function repairedEncoding( required string text ) {
+		if ( !static.C1_CONTROL.matcher( arguments.text ).find() ) {
+			return arguments.text
+		}
+		var matcher = static.DOUBLE_ENCODED.matcher( arguments.text )
+		var repaired = createObject( "java", "java.lang.StringBuilder" ).init()
+		while ( matcher.find() ) {
+			var fixed = matcher.group()
+			try {
+				fixed = strictly( fixed.getBytes( "ISO-8859-1" ), "UTF-8" )
+			} catch ( any e ) {
+				// not a character's bytes after all
+			}
+			matcher.appendReplacement( repaired, matcher.quoteReplacement( fixed ) )
+		}
+		matcher.appendTail( repaired )
+		return repaired.toString()
+	}
+
+	/**
+	 * ROME drops a date it can't read, and the text with it. So before it parses,
+	 * each date element it would refuse is rewritten as an ISO time when one of
+	 * DATE_FORMATS reads it; the rest are left for ROME to drop.
+	 */
+	private string function readableDates( required string text ) {
+		var dates = static.DATE_ELEMENT.matcher( arguments.text )
+		var parser = createObject( "java", "com.rometools.rome.io.impl.DateParser" )
+		var out = createObject( "java", "java.lang.StringBuilder" ).init()
+		var changed = false
+		while ( dates.find() ) {
+			var written = trim( dates.group( 3 ) )
+			if ( !len( written ) || !isNull( parser.parseDate( written, static.US ) ) ) {
+				continue
+			}
+			var iso = isoOf( lenientDate( written ) )
+			if ( len( iso ) ) {
+				changed = true
+				dates.appendReplacement( out, dates.quoteReplacement( "<" & dates.group( 1 ) & ( dates.group( 2 ) ?: "" ) & ">" & iso & "</" & dates.group( 1 ) & ">" ) )
+			}
+		}
+		if ( !changed ) {
+			return arguments.text
+		}
+		dates.appendTail( out )
+		return out.toString()
+	}
+
+	/** A date in one of DATE_FORMATS as a UTC datetime; null when none reads it. */
+	private function lenientDate( required string value ) {
+		// "Mon, 02 Nov 2026 10:00:00 +0000 (UTC)", runs of spaces
+		var written = reReplace( reReplace( trim( arguments.value ), "\s*\([^)]*\)$", "" ), "\s+", " ", "all" )
+		var standard = createObject( "java", "com.rometools.rome.io.impl.DateParser" ).parseDate( written, static.US )
+		if ( !isNull( standard ) ) {
+			return utc( standard )
+		}
+		for ( var format in static.DATE_FORMATS ) {
+			try {
+				var parsed = format.parse( written )
+				try {
+					return utc( createObject( "java", "java.time.ZonedDateTime" ).from( parsed ).toInstant() )
+				} catch ( any noZone ) {
+					try {
+						return utc( createObject( "java", "java.time.LocalDateTime" ).from( parsed ).toInstant( static.UTC ) )
+					} catch ( any noTime ) {
+						return utc( createObject( "java", "java.time.LocalDate" ).from( parsed ).atStartOfDay().toInstant( static.UTC ) )
+					}
+				}
+			} catch ( any e ) {
+				// the next format
+			}
+		}
+		return javacast( "null", "" )
+	}
+
+	private struct function itemOf( required entry, required boolean isAtom, required string type, required string base ) {
+		var link = resolveUrl( arguments.entry.getLink() ?: "", arguments.base )
 		var contentBase = isAbsolute( link ) ? link : arguments.base
-		var title = trim( arguments.entry.getTitle() ?: "" )
-		var isAtom = arguments.type.startsWith( "atom" )
+		var title = titleOf( arguments.entry.getTitleEx(), arguments.entry.getTitle() ?: "" )
+		var isAtom = arguments.isAtom
 
 		var description = arguments.entry.getDescription()
 		var summary = isNull( description ) ? "" : ( description.getValue() ?: "" )
@@ -169,17 +344,22 @@ class {
 			// RSS descriptions hold HTML whatever the version says; only Atom's type="text" means it
 			content = isAtom && isText( description.getType() ?: "" ) ? textToHtml( summary ) : summary
 		}
+		var media = mediaOf( arguments.entry, contentBase )
+		if ( !len( content ) ) {
+			// where YouTube puts the only text a video has
+			content = textToHtml( media.description )
+		}
 
 		var authors = []
 		for ( var person in arguments.entry.getAuthors() ) {
-			addOnce( authors, len( trim( person.getName() ?: "" ) ) ? person.getName() : ( person.getEmail() ?: "" ) )
+			addOnce( authors, nameOf( len( trim( person.getName() ?: "" ) ) ? person.getName() : ( person.getEmail() ?: "" ) ) )
 		}
 		if ( !authors.len() ) {
-			addOnce( authors, arguments.entry.getAuthor() ?: "" )
+			addOnce( authors, nameOf( arguments.entry.getAuthor() ?: "" ) )
 		}
 		var categories = []
 		for ( var category in arguments.entry.getCategories() ) {
-			addOnce( categories, category.getName() ?: "" )
+			addOnce( categories, plain( category.getName() ?: "" ) )
 		}
 		var enclosures = []
 		for ( var enclosure in arguments.entry.getEnclosures() ) {
@@ -191,8 +371,19 @@ class {
 				} )
 			}
 		}
+		var extras = podcastOf( arguments.entry.getForeignMarkup(), contentBase )
+		enclosures.append( extras.alternates, true )
+
+		var episode = arguments.entry.getModule( static.ITUNES )
+		var seconds = 0
+		var image = ""
+		if ( !isNull( episode ) ) {
+			var length = episode.getDuration()
+			seconds = isNull( length ) ? 0 : int( length.getMilliseconds() / 1000 )
+			image = trim( episode.getImageUri() ?: "" )
+		}
 		return {
-			id          : idOf( nativeId( arguments.entry, arguments.type ), rawLink, title, isoOf( utc( arguments.entry.getPublishedDate() ) ), content ),
+			id          : idOf( nativeId( arguments.entry, arguments.type ), link, title, isoOf( utc( arguments.entry.getPublishedDate() ) ), content ),
 			title       : title,
 			link        : link,
 			published   : utc( arguments.entry.getPublishedDate() ),
@@ -201,7 +392,12 @@ class {
 			summary     : absolutize( summary, contentBase ),
 			contentHtml : absolutize( content, contentBase ),
 			categories  : categories,
-			enclosures  : enclosures
+			enclosures  : enclosures,
+			commentsUrl : commentsOf( arguments.entry, arguments.base ),
+			image       : len( image ) ? resolveUrl( image, contentBase ) : media.image,
+			// a day or more is a typo, not an episode
+			durationSeconds : seconds > 0 && seconds < 86400 ? seconds : 0,
+			podcast     : { transcripts: extras.transcripts, chaptersUrl: extras.chaptersUrl, persons: extras.persons, soundbites: extras.soundbites }
 		}
 	}
 
@@ -226,17 +422,18 @@ class {
 	}
 
 	/**
-	 * An item's stable id. The feed's own id when it gives one, as it is. Otherwise
-	 * "sha256:" and the hash of the link as written in the feed and the title;
-	 * with no title, of the link and the published time; with neither, of the
-	 * link and the content.
+	 * An item's stable id: the feed's own id when it gives one, as it is; otherwise
+	 * the item's link; with neither, "sha256:" and the hash of its title, published
+	 * time and content.
 	 */
 	private string function idOf( required string native, required string link, required string title, required string published, required string content ) {
 		if ( len( trim( arguments.native ) ) ) {
 			return trim( arguments.native )
 		}
-		var second = len( arguments.title ) ? arguments.title : ( len( arguments.published ) ? arguments.published : arguments.content )
-		return "sha256:" & lcase( hash( arguments.link & char( 10 ) & second, "SHA-256", "UTF-8" ) )
+		if ( len( arguments.link ) ) {
+			return arguments.link
+		}
+		return "sha256:" & lcase( hash( arguments.title & char( 10 ) & arguments.published & char( 10 ) & arguments.content, "SHA-256", "UTF-8" ) )
 	}
 
 	/** Atom lists a rel="self" link too; the site is the alternate one. */
@@ -248,6 +445,218 @@ class {
 			}
 		}
 		return arguments.synd.getLink() ?: ""
+	}
+
+	/**
+	 * The feed's own address (rel="self"), its WebSub hubs (rel="hub") and the page
+	 * of older entries (RFC 5005: a paged feed's "next", an archived one's
+	 * "prev-archive"): an Atom feed's links, or the atom:link elements of an RSS channel.
+	 */
+	private struct function feedLinks( required synd, required string base ) {
+		var found = { self: "", hubs: [], next: "", archive: "" }
+		var links = []
+		links.append( arguments.synd.getLinks() ?: [], true )
+		var atom = arguments.synd.getModule( static.ATOM )
+		if ( !isNull( atom ) ) {
+			links.append( atom.getLinks() ?: [], true )
+		}
+		for ( var link in links ) {
+			var rel = lcase( trim( link.getRel() ?: "" ) )
+			var href = resolveUrl( link.getHref() ?: "", arguments.base )
+			if ( !len( href ) ) {
+				continue
+			}
+			if ( rel == "hub" ) {
+				addOnce( found.hubs, href )
+			} else if ( rel == "self" && !len( found.self ) ) {
+				found.self = href
+			} else if ( rel == "next" && !len( found.next ) ) {
+				found.next = href
+			} else if ( rel == "prev-archive" && !len( found.archive ) ) {
+				found.archive = href
+			}
+		}
+		if ( !len( found.next ) ) {
+			found.next = found.archive
+		}
+		return found
+	}
+
+	/**
+	 * How often the publisher says the feed is worth checking, in minutes: RSS
+	 * <ttl>, else sy:updatePeriod over sy:updateFrequency; 0 when it doesn't say.
+	 * And the hours (0 to 23, UTC) and days RSS <skipHours> and <skipDays> say to
+	 * leave it be.
+	 */
+	private struct function pollOf( required synd ) {
+		var poll = { minutes: 0, skipHours: [], skipDays: [] }
+		var wire = arguments.synd.originalWireFeed()
+		if ( !isNull( wire ) && wire.getClass().getSimpleName() == "Channel" ) {
+			poll.minutes = max( wire.getTtl(), 0 )
+			for ( var hour in wire.getSkipHours() ?: [] ) {
+				if ( isNumeric( hour ) && hour >= 0 && hour <= 23 && !poll.skipHours.contains( int( hour ) ) ) {
+					poll.skipHours.append( int( hour ) )
+				}
+			}
+			for ( var day in wire.getSkipDays() ?: [] ) {
+				var name = lcase( trim( day ) )
+				if ( static.DAYS.contains( name ) && !poll.skipDays.contains( name ) ) {
+					poll.skipDays.append( name )
+				}
+			}
+		}
+		if ( poll.minutes == 0 ) {
+			var period = ""
+			var frequency = 1
+			// ROME reads sy: for Atom and RSS 1.0, and leaves it as foreign markup in RSS 2.0
+			var sy = arguments.synd.getModule( static.SYNDICATION )
+			if ( !isNull( sy ) ) {
+				period = lcase( trim( sy.getUpdatePeriod() ?: "" ) )
+				frequency = max( 1, sy.getUpdateFrequency() )
+			}
+			for ( var element in arguments.synd.getForeignMarkup() ) {
+				if ( element.getNamespaceURI() != static.SYNDICATION ) {
+					continue
+				}
+				if ( element.getName() == "updatePeriod" ) {
+					period = lcase( trim( element.getText() ) )
+				} else if ( element.getName() == "updateFrequency" && isNumeric( trim( element.getText() ) ) ) {
+					frequency = max( 1, int( trim( element.getText() ) ) )
+				}
+			}
+			if ( static.PERIOD_MINUTES.keyExists( period ) ) {
+				poll.minutes = max( 1, int( static.PERIOD_MINUTES[ period ] / frequency ) )
+			}
+		}
+		// every hour, or every day, skipped is a mistake, not a schedule
+		if ( poll.skipHours.len() >= 24 ) {
+			poll.skipHours = []
+		}
+		if ( poll.skipDays.len() >= 7 ) {
+			poll.skipDays = []
+		}
+		return poll
+	}
+
+	/** RSS <comments>, else an Atom rel="replies" link to a page (not to a feed of comments). */
+	private string function commentsOf( required entry, required string base ) {
+		var comments = trim( arguments.entry.getComments() ?: "" )
+		if ( len( comments ) ) {
+			return resolveUrl( comments, arguments.base )
+		}
+		for ( var link in arguments.entry.getLinks() ?: [] ) {
+			var type = lcase( trim( link.getType() ?: "text/html" ) )
+			if ( lcase( trim( link.getRel() ?: "" ) ) == "replies" && ( type == "text/html" || type == "application/xhtml+xml" ) ) {
+				return resolveUrl( link.getHref() ?: "", arguments.base )
+			}
+		}
+		return ""
+	}
+
+	/**
+	 * Media RSS, on the item or in its first group that has any: the thumbnail
+	 * (else an image among the contents) and the description.
+	 * @return { image, description }
+	 */
+	private struct function mediaOf( required entry, required string base ) {
+		var found = { image: "", description: "" }
+		var media = arguments.entry.getModule( static.MEDIA )
+		if ( isNull( media ) ) {
+			return found
+		}
+		var holders = [ { metadata: media.getMetadata(), contents: media.getMediaContents() ?: [] } ]
+		for ( var group in media.getMediaGroups() ?: [] ) {
+			holders.append( { metadata: group.getMetadata(), contents: group.getContents() ?: [] } )
+		}
+		for ( var holder in holders ) {
+			var candidates = []
+			if ( holder.keyExists( "metadata" ) && !isNull( holder.metadata ) ) {
+				if ( !len( found.description ) ) {
+					found.description = trim( holder.metadata.getDescription() ?: "" )
+				}
+				for ( var thumbnail in holder.metadata.getThumbnail() ?: [] ) {
+					candidates.append( thumbnail.getUrl() )
+				}
+			}
+			for ( var content in holder.contents ) {
+				if ( lcase( content.getMedium() ?: "" ) == "image" || lcase( content.getType() ?: "" ).startsWith( "image/" ) ) {
+					candidates.append( content.getReference() )
+				}
+			}
+			for ( var candidate in candidates ) {
+				if ( !len( found.image ) && !isNull( candidate ) ) {
+					found.image = resolveUrl( candidate.toString(), arguments.base )
+				}
+			}
+		}
+		return found
+	}
+
+	/**
+	 * Podcasting 2.0, which ROME leaves as foreign markup, from an item's or a
+	 * channel's elements.
+	 * @return { transcripts: [ { url, type } ], chaptersUrl, persons: [ { name, role, url, image } ],
+	 *           funding: [ { url, label } ], soundbites: [ { startTime, duration, title } ],
+	 *           alternates: enclosures from podcast:alternateEnclosure }
+	 */
+	private struct function podcastOf( required markup, required string base ) {
+		var found = { transcripts: [], chaptersUrl: "", persons: [], funding: [], soundbites: [], alternates: [] }
+		for ( var element in arguments.markup ) {
+			if ( !static.PODCAST.contains( element.getNamespaceURI() ) ) {
+				continue
+			}
+			var text = plain( element.getTextNormalize() ?: "" )
+			var target = resolveUrl( element.getAttributeValue( "url" ) ?: "", arguments.base )
+			switch ( element.getName() ) {
+				case "transcript":
+					if ( len( target ) ) {
+						found.transcripts.append( { url: target, type: lcase( trim( element.getAttributeValue( "type" ) ?: "" ) ) } )
+					}
+					break
+				case "chapters":
+					if ( len( target ) && !len( found.chaptersUrl ) ) {
+						found.chaptersUrl = target
+					}
+					break
+				case "person":
+					if ( len( text ) ) {
+						found.persons.append( {
+							name  : text,
+							role  : lcase( trim( element.getAttributeValue( "role" ) ?: "host" ) ),
+							url   : resolveUrl( element.getAttributeValue( "href" ) ?: "", arguments.base ),
+							image : resolveUrl( element.getAttributeValue( "img" ) ?: "", arguments.base )
+						} )
+					}
+					break
+				case "funding":
+					if ( len( target ) ) {
+						found.funding.append( { url: target, label: text } )
+					}
+					break
+				case "soundbite":
+					var start = trim( element.getAttributeValue( "startTime" ) ?: "" )
+					var length = trim( element.getAttributeValue( "duration" ) ?: "" )
+					if ( isNumeric( start ) && start >= 0 && isNumeric( length ) && length > 0 ) {
+						found.soundbites.append( { startTime: start + 0, duration: length + 0, title: text } )
+					}
+					break
+				case "alternateEnclosure":
+					for ( var source in element.getChildren() ) {
+						var sourceUrl = source.getName() == "source" ? resolveUrl( source.getAttributeValue( "uri" ) ?: "", arguments.base ) : ""
+						if ( len( sourceUrl ) ) {
+							var size = trim( element.getAttributeValue( "length" ) ?: "" )
+							found.alternates.append( {
+								url    : sourceUrl,
+								type   : trim( source.getAttributeValue( "contentType" ) ?: element.getAttributeValue( "type" ) ?: "" ),
+								length : isNumeric( size ) && size > 0 ? size + 0 : 0
+							} )
+							break
+						}
+					}
+					break
+			}
+		}
+		return found
 	}
 
 	/** JSON Feed 1.0 and 1.1 (jsonfeed.org), mapped to the shape ROME's feeds get. */
@@ -266,6 +675,12 @@ class {
 		var base = isAbsolute( link ) ? link : arguments.baseUrl
 		var icon = jsonText( doc, "icon" )
 		var feedAuthors = jsonAuthors( doc )
+		var hubs = []
+		for ( var hub in isArray( doc.hubs ?: "" ) ? doc.hubs : [] ) {
+			if ( isStruct( hub ) ) {
+				addOnce( hubs, resolveUrl( jsonText( hub, "url" ), base ) )
+			}
+		}
 		var items = []
 		for ( var entry in doc.items ) {
 			if ( isStruct( entry ) ) {
@@ -274,24 +689,29 @@ class {
 		}
 		return {
 			type        : "json_" & listLast( version[ 1 ], "/" ),
-			title       : trim( jsonText( doc, "title" ) ),
+			title       : plain( jsonText( doc, "title" ) ),
 			link        : link,
+			feedUrl     : resolveUrl( jsonText( doc, "feed_url" ), arguments.baseUrl ),
 			description : trim( jsonText( doc, "description" ) ),
 			language    : trim( jsonText( doc, "language" ) ),
 			updated     : javacast( "null", "" ),
 			image       : resolveUrl( len( icon ) ? icon : jsonText( doc, "favicon" ), base ),
+			hubs        : hubs,
+			nextUrl     : resolveUrl( jsonText( doc, "next_url" ), arguments.baseUrl ),
+			poll        : { minutes: 0, skipHours: [], skipDays: [] },
+			podcast     : { persons: [], funding: [] },
 			items       : items
 		}
 	}
 
 	private struct function jsonItem( required struct entry, required string base, required array feedAuthors ) {
-		var rawLink = trim( jsonText( arguments.entry, "url" ) )
-		if ( !len( rawLink ) ) {
-			rawLink = trim( jsonText( arguments.entry, "external_url" ) )
+		var written = trim( jsonText( arguments.entry, "url" ) )
+		if ( !len( written ) ) {
+			written = trim( jsonText( arguments.entry, "external_url" ) )
 		}
-		var link = resolveUrl( rawLink, arguments.base )
+		var link = resolveUrl( written, arguments.base )
 		var contentBase = isAbsolute( link ) ? link : arguments.base
-		var title = trim( jsonText( arguments.entry, "title" ) )
+		var title = plain( jsonText( arguments.entry, "title" ) )
 		var content = jsonText( arguments.entry, "content_html" )
 		if ( !len( trim( content ) ) ) {
 			content = textToHtml( jsonText( arguments.entry, "content_text" ) )
@@ -304,27 +724,37 @@ class {
 			}
 		}
 		var enclosures = []
+		var seconds = 0
 		for ( var attachment in isArray( arguments.entry.attachments ?: "" ) ? arguments.entry.attachments : [] ) {
 			if ( isStruct( attachment ) && len( trim( jsonText( attachment, "url" ) ) ) ) {
 				var size = jsonText( attachment, "size_in_bytes" )
+				var length = jsonText( attachment, "duration_in_seconds" )
 				enclosures.append( {
 					url    : resolveUrl( jsonText( attachment, "url" ), arguments.base ),
 					type   : trim( jsonText( attachment, "mime_type" ) ),
 					length : isNumeric( size ) && size > 0 ? size + 0 : 0
 				} )
+				if ( seconds == 0 && isNumeric( length ) && length > 0 && length < 86400 ) {
+					seconds = int( length )
+				}
 			}
 		}
+		var image = jsonText( arguments.entry, "image" )
 		return {
-			id          : idOf( jsonText( arguments.entry, "id" ), rawLink, title, isoOf( rfc3339( jsonText( arguments.entry, "date_published" ) ) ), content ),
+			id          : idOf( jsonText( arguments.entry, "id" ), link, title, isoOf( jsonDate( jsonText( arguments.entry, "date_published" ) ) ), content ),
 			title       : title,
 			link        : link,
-			published   : rfc3339( jsonText( arguments.entry, "date_published" ) ),
-			updated     : rfc3339( jsonText( arguments.entry, "date_modified" ) ),
+			published   : jsonDate( jsonText( arguments.entry, "date_published" ) ),
+			updated     : jsonDate( jsonText( arguments.entry, "date_modified" ) ),
 			authors     : authors.len() ? authors : arguments.feedAuthors,
 			summary     : jsonText( arguments.entry, "summary" ),
 			contentHtml : absolutize( content, contentBase ),
 			categories  : categories,
-			enclosures  : enclosures
+			enclosures  : enclosures,
+			commentsUrl : "",
+			image       : resolveUrl( len( image ) ? image : jsonText( arguments.entry, "banner_image" ), contentBase ),
+			durationSeconds : seconds,
+			podcast     : { transcripts: [], chaptersUrl: "", persons: [], soundbites: [] }
 		}
 	}
 
@@ -352,21 +782,21 @@ class {
 		return isSimpleValue( value ) ? toString( value ) : ""
 	}
 
-	/** An RFC 3339 time as a UTC datetime; one without an offset is taken as UTC; null when it isn't one. */
-	private function rfc3339( required string value ) {
+	/** An RFC 3339 time, or failing that one of DATE_FORMATS, as a UTC datetime; null when it's neither. */
+	private function jsonDate( required string value ) {
 		var given = trim( arguments.value )
-		if ( len( given ) ) {
+		if ( !len( given ) ) {
+			return javacast( "null", "" )
+		}
+		try {
+			return utc( createObject( "java", "java.time.OffsetDateTime" ).parse( given ).toInstant() )
+		} catch ( any e ) {
 			try {
-				return utc( createObject( "java", "java.time.OffsetDateTime" ).parse( given ).toInstant() )
-			} catch ( any e ) {
-				try {
-					return utc( createObject( "java", "java.time.LocalDateTime" ).parse( given ).toInstant( static.UTC ) )
-				} catch ( any e2 ) {
-					// not a date
-				}
+				return utc( createObject( "java", "java.time.LocalDateTime" ).parse( given ).toInstant( static.UTC ) )
+			} catch ( any e2 ) {
+				return lenientDate( given )
 			}
 		}
-		return javacast( "null", "" )
 	}
 
 	/** A java.util.Date or Instant as a BoxLang datetime in UTC; null stays null. */
@@ -381,6 +811,36 @@ class {
 	/** A datetime as 2026-11-02T15:00:00Z, "" for null. A null can't be kept in a variable where bx-compat-cfml is loaded. */
 	private string function isoOf( moment ) {
 		return isNull( arguments.moment ) ? "" : arguments.moment.toISOString()
+	}
+
+	/**
+	 * A title as plain text. Only one the feed declares as HTML has its tags
+	 * stripped: anything else is text that may still carry (often double-encoded)
+	 * entities, and "<input> considered harmful" must keep its angle brackets.
+	 */
+	private string function titleOf( titleEx, string fallback = "" ) {
+		var value = isNull( arguments.titleEx ) ? arguments.fallback : ( arguments.titleEx.getValue() ?: "" )
+		var type = isNull( arguments.titleEx ) ? "" : trim( arguments.titleEx.getType() ?: "" )
+		if ( listFindNoCase( "html,xhtml,text/html,application/xhtml+xml", type ) ) {
+			value = reReplace( value, "<[^>]+>", "", "all" )
+		}
+		return plain( value )
+	}
+
+	/** Text with its HTML entities decoded and its whitespace tidied. */
+	private string function plain( required string value ) {
+		if ( !find( "&", arguments.value ) ) {
+			return trim( arguments.value )
+		}
+		// commons-text is part of the BoxLang runtime; it knows the HTML 4 entities and numeric references
+		return trim( createObject( "java", "org.apache.commons.text.StringEscapeUtils" ).unescapeHtml4( arguments.value ) )
+	}
+
+	/** An author as a name: RSS's "ada@example.com (Ada Lovelace)" is Ada Lovelace. */
+	private string function nameOf( required string value ) {
+		var written = plain( arguments.value )
+		var named = static.EMAIL_NAME.matcher( written )
+		return named.matches() ? trim( named.group( 1 ) ) : written
 	}
 
 	/**
@@ -404,7 +864,11 @@ class {
 		}
 	}
 
-	/** The HTML with relative href, src and poster attributes made absolute; nothing else is touched. */
+	/**
+	 * The HTML with the relative URLs of its tags made absolute: href, src and
+	 * poster, each candidate of a srcset, and url() in a style attribute.
+	 * Nothing else is touched.
+	 */
 	private string function absolutize( required string html, required string base ) {
 		if ( !isAbsolute( arguments.base ) || !find( "<", arguments.html ) ) {
 			return arguments.html
@@ -415,14 +879,71 @@ class {
 			var attributes = static.URL_ATTRIBUTE.matcher( tags.group() )
 			var tag = createObject( "java", "java.lang.StringBuilder" ).init()
 			while ( attributes.find() ) {
-				var value = attributes.group( 3 )
-				var resolved = isAbsolute( value ) || left( trim( value ), 1 ) == "##" ? value : resolveUrl( value, arguments.base )
-				attributes.appendReplacement( tag, tags.quoteReplacement( attributes.group( 1 ) & attributes.group( 2 ) & resolved & attributes.group( 2 ) ) )
+				var value = attributes.group( 4 )
+				switch ( lcase( attributes.group( 2 ) ) ) {
+					case "srcset":
+						value = srcsetIn( value, arguments.base )
+						break
+					case "style":
+						value = cssUrlsIn( value, arguments.base )
+						break
+					default:
+						value = absoluteUrl( value, arguments.base )
+				}
+				attributes.appendReplacement( tag, tags.quoteReplacement( attributes.group( 1 ) & attributes.group( 3 ) & value & attributes.group( 3 ) ) )
 			}
 			attributes.appendTail( tag )
 			tags.appendReplacement( out, tags.quoteReplacement( tag.toString() ) )
 		}
 		tags.appendTail( out )
+		return out.toString()
+	}
+
+	/** A URL from HTML made absolute; one that already is, or is only a fragment, as written. */
+	private string function absoluteUrl( required string value, required string base ) {
+		return isAbsolute( arguments.value ) || left( trim( arguments.value ), 1 ) == "##" || !len( trim( arguments.value ) ) ? arguments.value : resolveUrl( arguments.value, arguments.base )
+	}
+
+	/**
+	 * "a.jpg 1x, b.jpg 2x": each candidate is a URL, then descriptors up to a
+	 * comma. A comma inside a URL belongs to it; one at its end, or anywhere in
+	 * a descriptor, ends the candidate.
+	 */
+	private string function srcsetIn( required string value, required string base ) {
+		var candidates = []
+		var current = []
+		var tokens = listToArray( trim( arguments.value ), " #char( 9 )##char( 10 )##char( 13 )#" )
+		while ( tokens.len() ) {
+			var token = tokens.first()
+			tokens.deleteAt( 1 )
+			var comma = current.len() ? find( ",", token ) : ( right( token, 1 ) == "," ? len( reReplace( token, ",+$", "" ) ) + 1 : 0 )
+			var word = comma ? left( token, comma - 1 ) : token
+			var rest = comma ? reReplace( mid( token, comma, len( token ) ), "^,+", "" ) : ""
+			if ( len( word ) ) {
+				current.append( current.len() ? word : absoluteUrl( word, arguments.base ) )
+			}
+			if ( comma && current.len() ) {
+				candidates.append( current.toList( " " ) )
+				current = []
+			}
+			if ( len( rest ) ) {
+				tokens.prepend( rest )
+			}
+		}
+		if ( current.len() ) {
+			candidates.append( current.toList( " " ) )
+		}
+		return candidates.toList( ", " )
+	}
+
+	private string function cssUrlsIn( required string value, required string base ) {
+		var urls = static.CSS_URL.matcher( arguments.value )
+		var out = createObject( "java", "java.lang.StringBuilder" ).init()
+		while ( urls.find() ) {
+			var target = urls.group( 3 )
+			urls.appendReplacement( out, urls.quoteReplacement( urls.group( 1 ) & urls.group( 2 ) & ( left( lcase( trim( target ) ), 5 ) == "data:" ? target : absoluteUrl( target, arguments.base ) ) & urls.group( 2 ) & urls.group( 4 ) ) )
+		}
+		urls.appendTail( out )
 		return out.toString()
 	}
 

@@ -14,7 +14,7 @@ class extends="testbox.system.BaseSpec" {
 	}
 
 	function beforeAll() {
-		variables.fetcher = new bxModules.bxFeeds.models.FeedFetcher()
+		variables.fetcher = new bxModules.bxFeeds.models.FeedFetcher( { allowPrivateAddresses: true } )
 		variables.feeds = new tests.helpers.FeedServer()
 		var rss = fixture( "rss20.xml" )
 		var messy = fixture( "messy.xml" )
@@ -49,6 +49,16 @@ class extends="testbox.system.BaseSpec" {
 		feeds.on( "/gone", ( headers ) => { return { status: 410, body: "Gone" } } )
 		feeds.on( "/error", ( headers ) => { return { status: 500, body: "<html>Oops</html>" } } )
 		feeds.on( "/html", ( headers ) => { return { status: 200, headers: { "Content-Type": "text/html" }, body: "<!doctype html><html><body>Sign in</body></html>" } } )
+		feeds.on( "/busy", ( headers ) => { return { status: 429, headers: { "Retry-After": "120" } } } )
+		feeds.on( "/busy-until", ( headers ) => {
+			var later = createObject( "java", "java.time.ZonedDateTime" ).now( createObject( "java", "java.time.ZoneOffset" ).UTC ).plusMinutes( 10 )
+			return { status: 503, headers: { "Retry-After": createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME.format( later ) } }
+		} )
+		feeds.on( "/busy-nonsense", ( headers ) => { return { status: 429, headers: { "Retry-After": "soon" } } } )
+		feeds.on( "/linked", ( headers ) => {
+			return { status: 200, headers: { "Link": '<https://hub.example/>; rel="hub", </feed.xml>; rel="self alternate"; type="application/rss+xml", <https://no-rel.example/>' }, body: rss }
+		} )
+		feeds.on( "/image.png", ( headers ) => { return { status: 200, headers: { "Content-Type": "image/png" }, body: fixture( "garbage.bin" ) } } )
 		feeds.on( "/latin1", ( headers ) => {
 			return { status: 200, headers: { "Content-Type": "text/xml; charset=ISO-8859-1" }, body: "<rss version=""2.0""><channel><title>Caf#char( 233 )#</title></channel></rss>".getBytes( "ISO-8859-1" ) }
 		} )
@@ -89,7 +99,7 @@ class extends="testbox.system.BaseSpec" {
 				it( "sends the User-Agent it's given, per call or per fetcher", () => {
 					fetcher.fetch( feeds.at( "/feed.xml" ), { userAgent: "Feedhouse/1.0 (+https://feedhouse.app)" } )
 					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( "Feedhouse/1.0 (+https://feedhouse.app)" )
-					new bxModules.bxFeeds.models.FeedFetcher( { userAgent: "Mine/2" } ).fetch( feeds.at( "/feed.xml" ) )
+					new bxModules.bxFeeds.models.FeedFetcher( { userAgent: "Mine/2", allowPrivateAddresses: true } ).fetch( feeds.at( "/feed.xml" ) )
 					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( "Mine/2" )
 				} )
 
@@ -247,6 +257,99 @@ class extends="testbox.system.BaseSpec" {
 
 			} )
 
+			describe( "what else the response says", () => {
+
+				it( "reports Retry-After in seconds, sent as seconds or as a date", () => {
+					var busy = fetcher.fetch( feeds.at( "/busy" ) )
+					expect( busy.status ).toBe( 429 )
+					expect( busy.retryAfterSeconds ).toBe( 120 )
+					var until = fetcher.fetch( feeds.at( "/busy-until" ) ).retryAfterSeconds
+					expect( until ).toBeGT( 590 )
+					expect( until ).toBeLTE( 600 )
+					expect( fetcher.fetch( feeds.at( "/busy-nonsense" ) ).retryAfterSeconds ).toBe( 0 )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).retryAfterSeconds ).toBe( 0 )
+				} )
+
+				it( "reports the Link header's hub and self, resolved", () => {
+					var result = fetcher.fetch( feeds.at( "/linked" ) )
+					expect( result.links ).toBe( [
+						{ url: "https://hub.example/", rel: "hub" },
+						{ url: feeds.at( "/feed.xml" ), rel: "self" },
+						{ url: feeds.at( "/feed.xml" ), rel: "alternate" }
+					] )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).links ).toBeEmpty()
+				} )
+
+				it( "reports the content type", () => {
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).contentType ).toBe( "application/rss+xml; charset=utf-8" )
+				} )
+
+				it( "returns the bytes instead of a feed when asked not to parse", () => {
+					var result = fetcher.fetch( feeds.at( "/image.png" ), { parse: false } )
+					expect( result.status ).toBe( 200 )
+					expect( isNull( result.feed ) ).toBeTrue()
+					expect( isBinary( result.body ) ).toBeTrue()
+					expect( arrayLen( result.body ) ).toBe( arrayLen( fixture( "garbage.bin" ) ) )
+					expect( result.contentType ).toBe( "image/png" )
+					expect( isNull( fetcher.fetch( feeds.at( "/feed.xml" ) ).body ) ).toBeTrue()
+					expect( isNull( fetcher.fetch( feeds.at( "/gone" ), { parse: false } ).body ) ).toBeTrue()
+					expect( () => fetcher.fetch( feeds.at( "/big" ), { parse: false, maxBytes: 50000 } ) ).toThrow( type = "Feeds.FetchError.TooLarge" )
+				} )
+
+				it( "drops a default port, so the address is the one people type", () => {
+					expect( fetcher.withoutDefaultPort( "https://example.com:443/feed.xml?a=1%26b##top" ) ).toBe( "https://example.com/feed.xml?a=1%26b##top" )
+					expect( fetcher.withoutDefaultPort( "http://example.com:80/" ) ).toBe( "http://example.com/" )
+					expect( fetcher.withoutDefaultPort( "http://example.com:443/" ) ).toBe( "http://example.com:443/" )
+					expect( fetcher.withoutDefaultPort( "https://example.com:8443/x" ) ).toBe( "https://example.com:8443/x" )
+					expect( fetcher.withoutDefaultPort( "https://example.com/x" ) ).toBe( "https://example.com/x" )
+				} )
+
+			} )
+
+			describe( "private addresses", () => {
+
+				it( "refuses them by default, before connecting", () => {
+					var careful = new bxModules.bxFeeds.models.FeedFetcher()
+					var before = feeds.hits().len()
+					expect( () => careful.fetch( feeds.at( "/feed.xml" ) ) ).toThrow( type = "Feeds.FetchError.PrivateAddress" )
+					expect( feeds.hits().len() ).toBe( before )
+					for ( var address in [ "http://localhost/feed", "http://10.0.0.1/feed", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/", "http://[::1]/feed", "http://0.0.0.0/", "http://[::ffff:127.0.0.1]/" ] ) {
+						expect( () => careful.fetch( address ) ).toThrow( type = "Feeds.FetchError.PrivateAddress" )
+					}
+				} )
+
+				it( "can be caught as Feeds.FetchError", () => {
+					try {
+						fetchFeed( feeds.at( "/feed.xml" ) )
+						fail( "should have thrown" )
+					} catch ( "Feeds.FetchError" e ) {
+						expect( e.type ).toBe( "Feeds.FetchError.PrivateAddress" )
+						expect( e.message ).toBe( "127.0.0.1 is not a public address" )
+					}
+				} )
+
+				it( "allows them when told to, per call or per fetcher", () => {
+					expect( fetchFeed( feeds.at( "/feed.xml" ), { allowPrivateAddresses: true } ).status ).toBe( 200 )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).status ).toBe( 200 )
+				} )
+
+				it( "treats only public addresses as public", () => {
+					var inet = createObject( "java", "java.net.InetAddress" )
+					for ( var literal in [ "8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "64:ff9b::808:808", "2002:808:808::1" ] ) {
+						expect( fetcher.isPublicAddress( inet.getByName( literal ) ) ).toBeTrue( literal )
+					}
+					for ( var literal in [
+						"127.0.0.1", "127.8.8.8", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.0.1", "169.254.169.254", "0.0.0.0", "0.1.2.3",
+						"100.64.0.1", "100.127.255.255", "192.0.0.1", "198.18.0.1", "198.19.255.255", "224.0.0.1", "240.0.0.1", "255.255.255.255",
+						"::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "fec0::1", "ff02::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1",
+						"64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b:1::808:808", "2002:a00:1::1", "2002:7f00:1::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2"
+					] ) {
+						expect( fetcher.isPublicAddress( inet.getByName( literal ) ) ).toBeFalse( literal )
+					}
+				} )
+
+			} )
+
 			describe( "failures", () => {
 
 				it( "returns the status of a 4xx or 5xx, with no feed", () => {
@@ -267,6 +370,8 @@ class extends="testbox.system.BaseSpec" {
 					var address = closed.at( "/feed.xml" )
 					closed.stop()
 					expect( () => fetcher.fetch( address, { timeoutSeconds: 2 } ) ).toThrow( type = "Feeds.FetchError" )
+					expect( () => fetcher.fetch( "http://no-such-host.invalid/feed.xml" ) ).toThrow( type = "Feeds.FetchError" )
+					expect( () => new bxModules.bxFeeds.models.FeedFetcher().fetch( "http://no-such-host.invalid/feed.xml" ) ).toThrow( type = "Feeds.FetchError" )
 				} )
 
 				it( "throws Feeds.FetchError for anything but http(s)", () => {

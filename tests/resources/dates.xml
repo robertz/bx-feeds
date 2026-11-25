@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+<title>Dates</title><link>https://dates.example/</link><description>Every way to write one</description>
+<lastBuildDate>2026-11-03 09:30:00</lastBuildDate>
+<item><guid>rfc822</guid><title>RFC 822</title><pubDate>Mon, 02 Nov 2026 10:00:00 -0500</pubDate></item>
+<item><guid>full-names</guid><title>Full names</title><pubDate>Monday, 02 November 2026 10:00:00 GMT</pubDate></item>
+<item><guid>sql</guid><title>SQL, no zone</title><pubDate>2026-11-02 10:00:00</pubDate></item>
+<item><guid>sql-offset</guid><title>SQL with an offset</title><pubDate>2026-11-02 10:00:00 +0200</pubDate></item>
+<item><guid>us</guid><title>American</title><pubDate>November 2, 2026 3:15 PM</pubDate></item>
+<item><guid>date-only</guid><title>Only a day</title><pubDate>2 Nov 2026</pubDate></item>
+<item><guid>asctime</guid><title>asctime</title><pubDate>Mon Nov  2 10:00:00 2026</pubDate></item>
+<item><guid>trailing</guid><title>Zone named twice</title><pubDate>Mon, 02 Nov 2026 10:00:00 +0000 (UTC)</pubDate></item>
+<item><guid>shouting</guid><title>Upper case</title><pubDate>MON, 02 NOV 2026 10:00:00 GMT</pubDate></item>
+<item><guid>dc</guid><title>dc:date, slashes</title><dc:date>2026/11/02 10:00:00</dc:date></item>
+<item><guid>nonsense</guid><title>Nonsense</title><pubDate>the day before yesterday</pubDate></item>
+<item><guid>impossible</guid><title>Impossible</title><pubDate>2026-13-45 99:00:00</pubDate></item>
+<item><guid>empty</guid><title>Empty</title><pubDate>  </pubDate></item>
+</channel>
+</rss>

@@ -1,0 +1,14 @@
+/**
+ * Writes an OPML 2.0 subscription list from what parseOpml() returns, or from
+ * an array of outlines.
+ *
+ *   xml = toOpml( [ { title: "News", outlines: [ { title: "Example", feedUrl: "https://example.com/feed.xml" } ] } ], "My feeds" )
+ */
+@BoxBIF
+class {
+
+	function invoke( required list, string title = "" ) {
+		return new bxModules.bxFeeds.models.Opml().build( arguments.list, arguments.title )
+	}
+
+}

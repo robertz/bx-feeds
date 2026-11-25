@@ -66,6 +66,22 @@ class extends="testbox.system.BaseSpec" {
 				expect( getTickCount() - started ).toBeLT( 5000 )
 			} )
 
+			it( "treats an OPML file the same way", () => {
+				var before = target.hits().len()
+				var opml = new bxModules.bxFeeds.models.Opml()
+				var leaked = ""
+				try {
+					leaked = jsonSerialize( opml.parse( payload( "xxe.opml" ) ) )
+				} catch ( "Feeds.ParseError" e ) {
+					leaked = e.message & e.detail
+				}
+				expect( leaked ).notToInclude( "TOP-SECRET" )
+				expect( () => opml.parse( payload( "xxe.opml" ) ) ).toThrow( type = "Feeds.ParseError" )
+				// a DOCTYPE with nothing of its own to hide is cut and the file read
+				expect( opml.parse( payload( "external-dtd.xml" ).replace( "<rss version=""2.0"">", "<opml><body><outline text=""ok""/></body></opml><!--" ).replace( "</rss>", "-->" ) ).outlines[ 1 ].title ).toBe( "ok" )
+				expect( target.hits().len() ).toBe( before )
+			} )
+
 			it( "is just as safe when the attack comes as bytes or sits behind comments", () => {
 				var before = target.hits().len()
 				expect( () => parser.parse( payload( "xxe.xml" ).getBytes( "UTF-8" ) ) ).toThrow( type = "Feeds.ParseError" )

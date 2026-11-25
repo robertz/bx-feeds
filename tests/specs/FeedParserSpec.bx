@@ -151,10 +151,10 @@ class extends="testbox.system.BaseSpec" {
 					expect( second.authors ).toBe( [ "Site Author" ] )
 				} )
 
-				it( "hashes an id for an item without one, and resolves its link", () => {
+				it( "uses the resolved link as the id of an item without one", () => {
 					var third = parser.parse( fixture( "feed.json" ) ).items[ 3 ]
 					expect( third.link ).toBe( "https://json.example/posts/0" )
-					expect( third.id ).toBe( "sha256:" & lcase( hash( "posts/0" & char( 10 ) & "No id here", "SHA-256", "UTF-8" ) ) )
+					expect( third.id ).toBe( "https://json.example/posts/0" )
 				} )
 
 				it( "reads 1.0's single author", () => {
@@ -177,28 +177,31 @@ class extends="testbox.system.BaseSpec" {
 					var items = parser.parse( fixture( "rss20.xml" ) ).items
 					expect( items[ 1 ].id ).toBe( "tag:blog.example,2026:hello" )
 					expect( items[ 2 ].id ).toBe( "https://blog.example/second" )
+					expect( parser.parse( fixture( "atom10.xml" ) ).items[ 1 ].id ).toBe( "urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a" )
+					expect( parser.parse( fixture( "rss10.rdf" ) ).items[ 1 ].id ).toBe( "https://rdf.example/story/1" )
 				} )
 
-				it( "hashes the link as written and the title when there's no guid", () => {
+				it( "falls back to the item's link when there's no guid", () => {
 					var items = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ).items
-					expect( items[ 1 ].id ).toBe( "sha256:" & lcase( hash( "/posts/one" & char( 10 ) & "No guid, relative link", "SHA-256", "UTF-8" ) ) )
+					expect( items[ 1 ].id ).toBe( "https://messy.example/posts/one" )
+					expect( items[ 3 ].id ).toBe( "https://messy.example/posts/untitled" )
 					// a blank <guid> is no guid
-					expect( items[ 5 ].id ).toBe( "sha256:" & lcase( hash( "/posts/three" & char( 10 ) & "Empty guid", "SHA-256", "UTF-8" ) ) )
+					expect( items[ 5 ].id ).toBe( "https://messy.example/posts/three" )
+					expect( parser.parse( fixture( "feed.json" ) ).items[ 3 ].id ).toBe( "https://json.example/posts/0" )
 				} )
 
-				it( "falls back to the published time, then the content, when there's no title", () => {
-					var items = parser.parse( fixture( "messy.xml" ) ).items
-					expect( items[ 3 ].id ).toBe( "sha256:" & lcase( hash( "/posts/untitled" & char( 10 ) & "2026-11-01T00:00:00Z", "SHA-256", "UTF-8" ) ) )
-					expect( items[ 4 ].id ).toBe( "sha256:" & lcase( hash( char( 10 ) & "Nothing but words", "SHA-256", "UTF-8" ) ) )
+				it( "hashes the title, published time and content when there's no link either", () => {
+					var item = parser.parse( fixture( "messy.xml" ) ).items[ 4 ]
+					expect( item.id ).toBe( "sha256:" & lcase( hash( char( 10 ) & char( 10 ) & "Nothing but words", "SHA-256", "UTF-8" ) ) )
+					var dated = parser.parse( '<rss version="2.0"><channel><title>T</title><item><title>Note</title><pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate><description>Hi</description></item></channel></rss>' ).items[ 1 ]
+					expect( dated.id ).toBe( "sha256:" & lcase( hash( "Note" & char( 10 ) & "2026-11-02T10:00:00Z" & char( 10 ) & "Hi", "SHA-256", "UTF-8" ) ) )
 				} )
 
-				it( "gives the same ids whatever the base URL, and on every parse", () => {
+				it( "gives the same ids on every parse, each different", () => {
 					var ids = ( feed ) => feed.items.map( ( item ) => item.id )
-					var plain = ids( parser.parse( fixture( "messy.xml" ) ) )
-					expect( ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ) ) ).toBe( plain )
-					expect( ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://mirror.example/" } ) ) ).toBe( plain )
-					expect( arrayLen( plain ) ).toBe( 5 )
-					expect( structCount( plain.reduce( ( seen, id ) => { seen[ id ] = true; return seen }, {} ) ) ).toBe( 5 )
+					var first = ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ) )
+					expect( ids( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ) ) ).toBe( first )
+					expect( structCount( first.reduce( ( seen, id ) => { seen[ id ] = true; return seen }, {} ) ) ).toBe( 5 )
 				} )
 
 			} )

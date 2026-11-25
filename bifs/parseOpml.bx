@@ -1,0 +1,15 @@
+/**
+ * Reads an OPML subscription list, folders nested as in the file.
+ * input: the OPML as a string, as bytes, or the path of a file.
+ *
+ *   list = parseOpml( fileRead( "subscriptions.opml" ) )
+ *   // { title, outlines: [ { title, feedUrl, siteUrl, outlines: [] } ] }
+ */
+@BoxBIF
+class {
+
+	function invoke( required input ) {
+		return new bxModules.bxFeeds.models.Opml().parse( arguments.input )
+	}
+
+}

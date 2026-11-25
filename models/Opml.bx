@@ -1,0 +1,141 @@
+/**
+ * OPML subscription lists in and out, folders nested as in the file:
+ *
+ *   opml = new bxModules.bxFeeds.models.Opml()
+ *   list = opml.parse( fileRead( "subscriptions.opml" ) )
+ *   // { title, outlines: [ { title, feedUrl, siteUrl, outlines: [] } ] }
+ *   xml = opml.build( list )
+ *
+ * An outline with a feedUrl is a subscription; one without is a folder, and
+ * its outlines are what's in it. Like a feed, the file is read without its
+ * DOCTYPE, so it can't be used for XXE. Throws Feeds.ParseError.
+ */
+class {
+
+	function init() {
+		variables.parser = new FeedParser()
+		return this
+	}
+
+	/** input: the OPML as a string, as bytes, or the path of a file. */
+	struct function parse( required input ) {
+		var text = variables.parser.withoutDoctype( variables.parser.documentText( arguments.input ) )
+		var document = ""
+		try {
+			document = read( text )
+		} catch ( any e ) {
+			try {
+				// exporters forget to escape the & in a feed's address
+				document = read( reReplace( text, "&(?!([A-Za-z]+|##[0-9]+|##x[0-9A-Fa-f]+);)", "&amp;", "all" ) )
+			} catch ( any again ) {
+				unreadable( e.message ?: "" )
+			}
+		}
+		var root = document.getRootElement()
+		var body = root.getName() == "opml" ? child( root, "body" ) : javacast( "null", "" )
+		if ( isNull( body ) ) {
+			unreadable( "No <opml><body>" )
+		}
+		var head = child( root, "head" )
+		var title = isNull( head ) ? javacast( "null", "" ) : child( head, "title" )
+		return {
+			title    : isNull( title ) ? "" : trim( title.getText() ),
+			outlines : outlinesOf( body )
+		}
+	}
+
+	/**
+	 * list: { title, outlines } as parse() returns it, or just the outlines array.
+	 * Missing keys are fine: an outline needs a title, and a feedUrl or outlines.
+	 */
+	string function build( required list, string title = "" ) {
+		var outlines = isArray( arguments.list ) ? arguments.list : ( arguments.list.outlines ?: [] )
+		var heading = len( arguments.title ) ? arguments.title : ( isStruct( arguments.list ) ? ( arguments.list.title ?: "" ) : "" )
+		var created = createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME
+			.format( createObject( "java", "java.time.ZonedDateTime" ).now( createObject( "java", "java.time.ZoneOffset" ).UTC ) )
+		var lines = [
+			"<?xml version=""1.0"" encoding=""UTF-8""?>",
+			"<opml version=""2.0"">",
+			"<head><title>#escaped( heading )#</title><dateCreated>#created#</dateCreated></head>",
+			"<body>"
+		]
+		lines.append( linesFor( outlines, "  " ), true )
+		lines.append( "</body>" )
+		lines.append( "</opml>" )
+		return lines.toList( char( 10 ) ) & char( 10 )
+	}
+
+	private function read( required string text ) {
+		var builder = createObject( "java", "org.jdom2.input.SAXBuilder" ).init()
+		builder.setFeature( "http://apache.org/xml/features/disallow-doctype-decl", true )
+		return builder.build( createObject( "java", "java.io.StringReader" ).init( arguments.text ) )
+	}
+
+	private array function outlinesOf( required parent ) {
+		var outlines = []
+		for ( var element in arguments.parent.getChildren() ) {
+			if ( element.getName() != "outline" ) {
+				continue
+			}
+			// xmlUrl is also seen as xmlurl and XMLURL
+			var attributes = {}
+			for ( var attribute in element.getAttributes() ) {
+				attributes[ attribute.getName() ] = trim( attribute.getValue() )
+			}
+			outlines.append( {
+				title    : len( attributes.title ?: "" ) ? attributes.title : ( attributes.text ?: "" ),
+				feedUrl  : attributes.xmlUrl ?: "",
+				siteUrl  : attributes.htmlUrl ?: "",
+				outlines : outlinesOf( element )
+			} )
+		}
+		return outlines
+	}
+
+	private array function linesFor( required array outlines, required string indent ) {
+		var lines = []
+		for ( var outline in arguments.outlines ) {
+			var title = escaped( outline.title ?: "" )
+			var attributes = "text=""#title#"" title=""#title#"""
+			if ( len( outline.feedUrl ?: "" ) ) {
+				attributes = "type=""rss"" " & attributes & " xmlUrl=""#escaped( outline.feedUrl )#"""
+			}
+			if ( len( outline.siteUrl ?: "" ) ) {
+				attributes &= " htmlUrl=""#escaped( outline.siteUrl )#"""
+			}
+			var inner = isArray( outline.outlines ?: "" ) ? outline.outlines : []
+			if ( !inner.len() ) {
+				lines.append( arguments.indent & "<outline #attributes#/>" )
+				continue
+			}
+			lines.append( arguments.indent & "<outline #attributes#>" )
+			lines.append( linesFor( inner, arguments.indent & "  " ), true )
+			lines.append( arguments.indent & "</outline>" )
+		}
+		return lines
+	}
+
+	private function child( required element, required string name ) {
+		for ( var found in arguments.element.getChildren() ) {
+			if ( found.getName() == arguments.name ) {
+				return found
+			}
+		}
+		return javacast( "null", "" )
+	}
+
+	/** The five XML specials only; encodeForXML also escapes ":" and "/", which makes URLs unreadable. */
+	private string function escaped( required string value ) {
+		return arguments.value
+			.replace( "&", "&amp;", "all" )
+			.replace( "<", "&lt;", "all" )
+			.replace( ">", "&gt;", "all" )
+			.replace( """", "&quot;", "all" )
+			.replace( "'", "&apos;", "all" )
+	}
+
+	private void function unreadable( string detail = "" ) {
+		throw( type = "Feeds.ParseError", message = "That isn't a readable OPML file", detail = arguments.detail )
+	}
+
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>Foxâs Latest</title>
+<link>https://example.com/</link>
+<item>
+<guid>urn:mangled</guid>
+<title>Itâs the âbig oneâ â again</title>
+<author>RenÃ©e Doe</author>
+<description>&lt;p&gt;Wait for itâ¦ then go â fast ð&lt;/p&gt;</description>
+</item>
+</channel></rss>

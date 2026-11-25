@@ -1,0 +1,92 @@
+/** OPML subscription lists in and out. */
+class extends="testbox.system.BaseSpec" {
+
+	function fixture( required string name ) {
+		return fileReadBinary( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+	}
+
+	function run() {
+
+		describe( "Opml", () => {
+
+			beforeEach( () => {
+				variables.opml = new bxModules.bxFeeds.models.Opml()
+				variables.list = variables.opml.parse( fixture( "subscriptions.opml" ) )
+			} )
+
+			it( "reads the title and the top-level outlines in order", () => {
+				expect( list.title ).toBe( "Exported from somewhere else" )
+				expect( list.outlines.map( ( outline ) => outline.title ) ).toBe( [ "Unfiled feed", "Tech", "News & Politics", "Empty folder" ] )
+			} )
+
+			it( "reads a subscription's addresses", () => {
+				expect( list.outlines[ 1 ] ).toBe( { title: "Unfiled feed", feedUrl: "https://unfiled.example/feed.xml", siteUrl: "https://unfiled.example/", outlines: [] } )
+			} )
+
+			it( "nests folders as the file does", () => {
+				var tech = list.outlines[ 2 ]
+				expect( tech.feedUrl ).toBe( "" )
+				expect( tech.outlines.len() ).toBe( 2 )
+				expect( tech.outlines[ 2 ].title ).toBe( "Nested group" )
+				expect( tech.outlines[ 2 ].outlines[ 1 ].title ).toBe( "Deep Tech" )
+				expect( list.outlines[ 4 ] ).toBe( { title: "Empty folder", feedUrl: "", siteUrl: "", outlines: [] } )
+			} )
+
+			it( "prefers title over text, and takes xmlUrl however it's cased, trimmed", () => {
+				expect( list.outlines[ 2 ].outlines[ 1 ].title ).toBe( "Tech One" )
+				expect( list.outlines[ 2 ].outlines[ 1 ].feedUrl ).toBe( "https://tech-one.example/rss?a=1&b=2" )
+				expect( list.outlines[ 2 ].outlines[ 2 ].outlines[ 1 ].feedUrl ).toBe( "https://deep.example/atom.xml" )
+				expect( list.outlines[ 3 ].outlines[ 1 ].feedUrl ).toBe( "https://news.example/feed" )
+			} )
+
+			it( "takes a string, bytes or a file path", () => {
+				var path = getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/subscriptions.opml"
+				expect( opml.parse( path ).outlines.len() ).toBe( 4 )
+				expect( opml.parse( fileRead( path ) ).outlines.len() ).toBe( 4 )
+			} )
+
+			it( "reads a file whose exporter forgot to escape an ampersand", () => {
+				var broken = opml.parse( fixture( "broken-ampersand.opml" ) )
+				expect( broken.title ).toBe( "Tom & Jerry's feeds" )
+				expect( broken.outlines[ 1 ].feedUrl ).toBe( "https://q.example/feed?a=1&b=2&c=3" )
+			} )
+
+			it( "writes what it reads", () => {
+				var written = opml.build( list )
+				expect( written ).toInclude( '<opml version="2.0">' )
+				expect( written ).toInclude( 'xmlUrl="https://tech-one.example/rss?a=1&amp;b=2"' )
+				var again = opml.parse( written )
+				expect( again.title ).toBe( list.title )
+				expect( again.outlines ).toBe( list.outlines )
+			} )
+
+			it( "builds from a plain array of outlines, escaping what XML needs", () => {
+				var written = opml.build( [
+					{ title: "Q&A <live>", feedUrl: "https://q.example/feed?a=1&b=""2""" },
+					{ title: "Folder", outlines: [ { title: "Inside", feedUrl: "https://in.example/rss", siteUrl: "https://in.example/" } ] }
+				], "Mine & yours" )
+				var again = opml.parse( written )
+				expect( again.title ).toBe( "Mine & yours" )
+				expect( again.outlines[ 1 ] ).toBe( { title: "Q&A <live>", feedUrl: "https://q.example/feed?a=1&b=""2""", siteUrl: "", outlines: [] } )
+				expect( again.outlines[ 2 ].outlines[ 1 ].siteUrl ).toBe( "https://in.example/" )
+			} )
+
+			it( "throws Feeds.ParseError for what isn't OPML", () => {
+				expect( () => opml.parse( "<rss version=""2.0""><channel><title>A feed</title></channel></rss>" ) ).toThrow( type = "Feeds.ParseError" )
+				expect( () => opml.parse( "<opml version=""2.0""><head/></opml>" ) ).toThrow( type = "Feeds.ParseError" )
+				expect( () => opml.parse( "<opml><body><outline text=""cut off""" ) ).toThrow( type = "Feeds.ParseError" )
+				expect( () => opml.parse( fixture( "garbage.bin" ) ) ).toThrow( type = "Feeds.ParseError" )
+				expect( () => opml.parse( "" ) ).toThrow( type = "Feeds.ParseError" )
+			} )
+
+			it( "works through the parseOpml() and toOpml() BIFs", () => {
+				var parsed = parseOpml( fixture( "subscriptions.opml" ) )
+				expect( parsed.outlines.len() ).toBe( 4 )
+				expect( parseOpml( toOpml( parsed.outlines, "Renamed" ) ).title ).toBe( "Renamed" )
+			} )
+
+		} )
+
+	}
+
+}

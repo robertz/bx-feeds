@@ -9,6 +9,7 @@ ARTIFACTS=(
   "com.rometools:rome:2.1.0"
   "com.rometools:rome-utils:2.1.0"
   "org.jdom:jdom2:2.0.6.1"
+  "com.rometools:rome-modules:2.1.0"
 )
 
 rm -rf libs

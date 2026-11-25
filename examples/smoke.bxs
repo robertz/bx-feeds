@@ -42,9 +42,9 @@ httpServer.createContext( "/", ( exchange ) => {
 httpServer.start()
 try {
 	feedUrl = "http://127.0.0.1:#httpServer.getAddress().getPort()#/feed.xml"
-	first = fetchFeed( feedUrl )
+	first = fetchFeed( feedUrl, { allowPrivateAddresses: true } )
 	println( "Fetched: #first.status#, etag #first.etag#, #first.feed.items.len()# items, first link #first.feed.items[ 1 ].link#" )
-	second = fetchFeed( feedUrl, { etag: first.etag, lastModified: first.lastModified } )
+	second = fetchFeed( feedUrl, { etag: first.etag, lastModified: first.lastModified, allowPrivateAddresses: true } )
 	println( "Again: #second.status#, not modified: #second.notModified#" )
 } finally {
 	httpServer.stop( 0 )

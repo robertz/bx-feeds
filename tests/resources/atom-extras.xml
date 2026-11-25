@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/">
+<title type="html">Atom &lt;em&gt;Extras&lt;/em&gt; &amp;amp; more</title>
+<id>urn:atom-extras</id>
+<updated>2026-10-20T00:00:00Z</updated>
+<link rel="alternate" href="https://atom.example/"/>
+<link rel="self" href="https://atom.example/atom.xml"/>
+<link rel="hub" href="https://websub.example/hub"/>
+<link rel="prev-archive" href="archive/2026-09.xml"/>
+<sy:updatePeriod>daily</sy:updatePeriod>
+<sy:updateFrequency>4</sy:updateFrequency>
+<entry>
+<title>&lt;input&gt; considered harmful</title>
+<id>urn:replies</id>
+<updated>2026-10-20T00:00:00Z</updated>
+<link rel="alternate" href="https://atom.example/post"/>
+<link rel="replies" type="application/atom+xml" href="https://atom.example/post/comments.xml"/>
+<link rel="replies" type="text/html" href="/post#comments"/>
+<category term="web" label="The Web"/>
+<content type="text">Body</content>
+</entry>
+</feed>

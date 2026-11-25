@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE opml SYSTEM "http://example.invalid/opml.dtd">
+<opml version="1.0">
+<head><title>Exported from somewhere else</title></head>
+<body>
+  <outline text="Unfiled feed" type="rss" xmlUrl="https://unfiled.example/feed.xml" htmlUrl="https://unfiled.example/"/>
+  <outline text="Tech" title="Tech">
+    <outline text="Tech One (text)" title="Tech One" type="rss" xmlUrl="https://tech-one.example/rss?a=1&amp;b=2" htmlUrl="https://tech-one.example/"/>
+    <outline text="Nested group">
+      <outline text="Deep Tech" type="rss" xmlurl=" https://deep.example/atom.xml "/>
+    </outline>
+  </outline>
+  <outline title="News &amp; Politics">
+    <outline title="Daily News" type="rss" XMLURL="https://news.example/feed"/>
+  </outline>
+  <outline text="Empty folder"/>
+  <notanoutline text="ignored"/>
+</body>
+</opml>

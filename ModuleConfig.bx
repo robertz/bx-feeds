@@ -17,7 +17,8 @@ class {
 			userAgent      : "bx-feeds/#this.version# (+https://github.com/robertz/bx-feeds)",
 			timeoutSeconds : 20,
 			maxBytes       : 10485760,
-			maxRedirects   : 5
+			maxRedirects   : 5,
+			allowPrivateAddresses : false
 		};
 	}
 

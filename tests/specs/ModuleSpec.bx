@@ -1,4 +1,4 @@
-/** The module as installed: its settings and the three BIFs. */
+/** The module as installed: its settings and the BIFs. */
 class extends="testbox.system.BaseSpec" {
 
 	function run() {
@@ -11,6 +11,7 @@ class extends="testbox.system.BaseSpec" {
 				expect( settings.timeoutSeconds ).toBe( 20 )
 				expect( settings.maxBytes ).toBe( 10485760 )
 				expect( settings.maxRedirects ).toBe( 5 )
+				expect( settings.allowPrivateAddresses ).toBeFalse()
 			} )
 
 			it( "parses with parseFeed()", () => {

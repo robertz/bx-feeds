@@ -3,12 +3,14 @@
  * unchanged feed costs one small request:
  *
  *   result = new bxModules.bxFeeds.models.FeedFetcher().fetch( feedUrl, { etag: saved.etag, lastModified: saved.lastModified } )
- *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, feed }
+ *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, contentType, retryAfterSeconds, links, feed, body }
  *
  * feed is the FeedParser struct on a 200 and null otherwise (304, 404, 500...).
- * Redirects are followed by hand so permanent ones can be reported. A network
+ * Redirects are followed by hand so permanent ones can be reported, and every
+ * hop must be a public address unless allowPrivateAddresses is set. A network
  * failure throws Feeds.FetchError, or its subtypes Feeds.FetchError.Timeout,
- * .TooLarge and .TooManyRedirects; a 200 that isn't a feed throws Feeds.ParseError.
+ * .TooLarge, .TooManyRedirects and .PrivateAddress; a 200 that isn't a feed
+ * throws Feeds.ParseError.
  */
 class {
 
@@ -17,9 +19,11 @@ class {
 	static {
 		ACCEPT = "application/feed+json, application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 		REDIRECTS = [ 301, 302, 303, 307, 308 ]
+		LINK = createObject( "java", "java.util.regex.Pattern" ).compile( "<([^>]*)>([^,<]*)" )
+		LINK_REL = createObject( "java", "java.util.regex.Pattern" ).compile( "(?i);\s*rel\s*=\s*(?:""([^""]*)""|([^;\s]+))" )
 	}
 
-	/** overrides: any of the module's settings (userAgent, timeoutSeconds, maxBytes, maxRedirects). */
+	/** overrides: any of the module's settings (userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses). */
 	function init( struct overrides = {} ) {
 		variables.settings = duplicate( getModuleInfo( "bxFeeds" ).settings ).append( arguments.overrides )
 		variables.parser = new FeedParser()
@@ -28,7 +32,8 @@ class {
 
 	/**
 	 * options: { etag, lastModified: from the last fetch's result, sent as If-None-Match and
-	 *            If-Modified-Since; userAgent, timeoutSeconds, maxBytes, maxRedirects: for this call }
+	 *            If-Modified-Since; parse: false to get a 200's bytes in body instead of a feed;
+	 *            userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses: for this call }
 	 * timeoutSeconds covers the whole fetch, redirects and body included; maxBytes
 	 * counts the body after gzip is undone.
 	 */
@@ -44,7 +49,7 @@ class {
 				var status = overNetwork( () => connection.getResponseCode() )
 				var location = trim( connection.getHeaderField( "Location" ) ?: "" )
 				if ( static.REDIRECTS.contains( status ) && len( location ) ) {
-					current = variables.parser.resolveUrl( location, current )
+					current = withoutDefaultPort( variables.parser.resolveUrl( location, current ) )
 					// a 301 or 308 moves the feed for good, but only until a temporary hop: what's behind that may change
 					onlyPermanent = onlyPermanent && ( status == 301 || status == 308 )
 					if ( onlyPermanent ) {
@@ -59,13 +64,16 @@ class {
 					lastModified : connection.getHeaderField( "Last-Modified" ) ?: ( status == 304 ? ( config.lastModified ?: "" ) : "" ),
 					finalUrl     : current,
 					permanentUrl : permanentUrl,
-					feed         : javacast( "null", "" )
+					contentType  : connection.getContentType() ?: "",
+					retryAfterSeconds : retryAfter( connection.getHeaderField( "Retry-After" ) ?: "" ),
+					links        : linksOf( connection, current ),
+					feed         : javacast( "null", "" ),
+					body         : javacast( "null", "" )
 				}
-				if ( status == 200 ) {
-					result.feed = variables.parser.parse(
-						bodyOf( connection, config.maxBytes, deadline ),
-						{ baseUrl: current, contentType: connection.getContentType() ?: "" }
-					)
+				if ( status == 200 && ( config.parse ?: true ) ) {
+					result.feed = variables.parser.parse( bodyOf( connection, config.maxBytes, deadline ), { baseUrl: current, contentType: result.contentType } )
+				} else if ( status == 200 ) {
+					result.body = bodyOf( connection, config.maxBytes, deadline )
 				}
 				return result
 			} finally {
@@ -78,6 +86,9 @@ class {
 	private function open( required string target, required struct config, required numeric deadline ) {
 		if ( !reFindNoCase( "^https?://[^/\s]", arguments.target ) ) {
 			throw( type = "Feeds.FetchError", message = "Only http and https URLs can be fetched" )
+		}
+		if ( !( arguments.config.allowPrivateAddresses ?: false ) ) {
+			requirePublicHost( arguments.target )
 		}
 		var remaining = remainingMs( arguments.deadline )
 		var address = arguments.target
@@ -129,6 +140,137 @@ class {
 			}
 			return body.toByteArray()
 		} )
+	}
+
+	/**
+	 * Every address the host resolves to must be public: Feeds.FetchError.PrivateAddress
+	 * otherwise. The JVM caches the lookup (30s by default), so the connection that
+	 * follows normally uses the addresses that were checked.
+	 */
+	private void function requirePublicHost( required string target ) {
+		var host = ""
+		var addresses = []
+		try {
+			host = createObject( "java", "java.net.URI" ).init( arguments.target ).getHost() ?: ""
+			addresses = createObject( "java", "java.net.InetAddress" ).getAllByName( host )
+		} catch ( any e ) {
+			throw( type = "Feeds.FetchError", message = "The feed couldn't be fetched", detail = "Unknown host: #host#" )
+		}
+		for ( var address in addresses ) {
+			if ( !isPublicAddress( address ) ) {
+				throw( type = "Feeds.FetchError.PrivateAddress", message = "#host# is not a public address" )
+			}
+		}
+	}
+
+	/**
+	 * Whether a java.net.InetAddress is one on the public internet: not loopback,
+	 * link-local, private, carrier-grade NAT, reserved, or an IPv6 form that
+	 * carries or tunnels to such an IPv4 address. InetAddress hands IPv4-mapped
+	 * IPv6 (::ffff:a.b.c.d) back as IPv4, so those are covered.
+	 */
+	boolean function isPublicAddress( required address ) {
+		var a = arguments.address
+		if ( a.isAnyLocalAddress() || a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isSiteLocalAddress() || a.isMulticastAddress() ) {
+			return false
+		}
+		var bytes = a.getAddress()
+		var unsigned = []
+		for ( var b in bytes ) {
+			unsigned.append( bitAnd( b, 255 ) )
+		}
+		if ( unsigned.len() == 4 ) {
+			return !(
+				unsigned[ 1 ] == 0                                                    // "this network"
+				|| ( unsigned[ 1 ] == 100 && bitAnd( unsigned[ 2 ], 192 ) == 64 )     // 100.64/10 carrier-grade NAT
+				|| ( unsigned[ 1 ] == 192 && unsigned[ 2 ] == 0 && unsigned[ 3 ] == 0 ) // 192.0.0/24
+				|| ( unsigned[ 1 ] == 198 && bitAnd( unsigned[ 2 ], 254 ) == 18 )     // 198.18/15 benchmarking
+				|| unsigned[ 1 ] >= 240                                               // reserved and broadcast
+			)
+		}
+		// fc00::/7 unique local; fec0::/10 is site-local, caught above
+		if ( bitAnd( unsigned[ 1 ], 254 ) == 252 ) {
+			return false
+		}
+		// IPv6 that carries an IPv4 address is judged by that address, so a private one can't ride along
+		var arrays = createObject( "java", "java.util.Arrays" )
+		var inet = createObject( "java", "java.net.InetAddress" )
+		// 64:ff9b::/96, NAT64's well-known prefix: the last four bytes
+		if ( unsigned[ 1 ] == 0 && unsigned[ 2 ] == 100 && unsigned[ 3 ] == 255 && unsigned[ 4 ] == 155 ) {
+			if ( unsigned[ 5 ] == 0 && unsigned[ 6 ] == 1 ) {
+				// 64:ff9b:1::/48, local-use NAT64: whatever it maps to is the network's own
+				return false
+			}
+			if ( unsigned.slice( 5, 8 ).every( ( v ) => v == 0 ) ) {
+				return isPublicAddress( inet.getByAddress( arrays.copyOfRange( bytes, 12, 16 ) ) )
+			}
+		}
+		// 2002::/16, 6to4: bytes 3 to 6
+		if ( unsigned[ 1 ] == 32 && unsigned[ 2 ] == 2 ) {
+			return isPublicAddress( inet.getByAddress( arrays.copyOfRange( bytes, 2, 6 ) ) )
+		}
+		// 2001::/32, Teredo: tunnels to an address it obscures, never a feed's server
+		if ( unsigned[ 1 ] == 32 && unsigned[ 2 ] == 1 && unsigned[ 3 ] == 0 && unsigned[ 4 ] == 0 ) {
+			return false
+		}
+		return true
+	}
+
+	/**
+	 * Some servers redirect to https://host:443/...; that's the same address as
+	 * https://host/..., and stored with the port it would count as another feed.
+	 */
+	string function withoutDefaultPort( required string address ) {
+		try {
+			var u = createObject( "java", "java.net.URI" ).init( arguments.address )
+			var scheme = lcase( u.getScheme() ?: "" )
+			if ( isNull( u.getHost() ) || !( ( scheme == "https" && u.getPort() == 443 ) || ( scheme == "http" && u.getPort() == 80 ) ) ) {
+				return arguments.address
+			}
+			// from the raw parts: the decoding constructors would turn an escaped & (%26) into a real one
+			return u.getScheme() & "://"
+				& ( isNull( u.getRawUserInfo() ) ? "" : u.getRawUserInfo() & "@" )
+				& u.getHost()
+				& ( u.getRawPath() ?: "" )
+				& ( isNull( u.getRawQuery() ) ? "" : "?" & u.getRawQuery() )
+				& ( isNull( u.getRawFragment() ) ? "" : "##" & u.getRawFragment() )
+		} catch ( any e ) {
+			return arguments.address
+		}
+	}
+
+	/** Retry-After as seconds from now, whether it was sent as seconds or as a date; 0 when it's absent or unreadable. */
+	private numeric function retryAfter( required string value ) {
+		var written = trim( arguments.value )
+		if ( reFind( "^[0-9]{1,9}$", written ) ) {
+			return int( written )
+		}
+		if ( len( written ) ) {
+			try {
+				var until = createObject( "java", "java.time.ZonedDateTime" ).parse( written, createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME )
+				return max( 0, int( until.toEpochSecond() - getTickCount() / 1000 ) )
+			} catch ( any e ) {
+				// not a date either
+			}
+		}
+		return 0
+	}
+
+	/** The response's Link headers (RFC 8288), where a feed can name its WebSub hub and itself: [ { url, rel } ], one per rel. */
+	private array function linksOf( required connection, required string base ) {
+		var found = []
+		var values = arguments.connection.getHeaderFields().get( "Link" ) ?: arguments.connection.getHeaderFields().get( "link" ) ?: []
+		for ( var value in values ) {
+			var links = static.LINK.matcher( value )
+			while ( links.find() ) {
+				var rel = static.LINK_REL.matcher( links.group( 2 ) )
+				var rels = rel.find() ? ( rel.group( 1 ) ?: rel.group( 2 ) ) : ""
+				for ( var name in listToArray( lcase( rels ), " " ) ) {
+					found.append( { url: variables.parser.resolveUrl( links.group( 1 ), arguments.base ), rel: name } )
+				}
+			}
+		}
+		return found
 	}
 
 	/** Milliseconds left before the deadline; Feeds.FetchError.Timeout when there are none. */

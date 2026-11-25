@@ -1,0 +1,257 @@
+/**
+ * What a reader needs beyond the basics: repairs for feeds XML parsers refuse,
+ * the feed's own links and polling hints, cleaned titles, podcast and media
+ * fields, dates in odd formats, and URLs in srcset and style.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function fixture( required string name ) {
+		return fileReadBinary( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+	}
+
+	function iso( moment ) {
+		return isNull( arguments.moment ) ? "null" : arguments.moment.toISOString()
+	}
+
+	function run() {
+
+		describe( "FeedParser, beyond the basics", () => {
+
+			beforeEach( () => {
+				variables.parser = new bxModules.bxFeeds.models.FeedParser()
+				variables.show = variables.parser.parse( fixture( "extras.xml" ), { baseUrl: "https://show.example/feed.xml" } )
+			} )
+
+			describe( "repairs", () => {
+
+				it( "reads a feed whose root element repeats an attribute", () => {
+					var feed = parser.parse( fixture( "broken-root-attributes.xml" ) )
+					expect( feed.title ).toBe( "Two podcast plugins" )
+					expect( feed.items[ 1 ].id ).toBe( "one" )
+					expect( feed.items[ 1 ].durationSeconds ).toBe( 720 )
+				} )
+
+				it( "drops a skipHours or skipDays ROME refuses, after fixing the root element too", () => {
+					var feed = parser.parse( fixture( "broken-skip-schedule.xml" ) )
+					expect( feed.title ).toBe( "Night Shift" )
+					expect( feed.items.len() ).toBe( 1 )
+					expect( feed.poll.skipHours ).toBeEmpty()
+				} )
+
+				it( "puts back every character of a feed that encoded its UTF-8 twice", () => {
+					var feed = parser.parse( fixture( "double-encoded.xml" ) )
+					expect( feed.title ).toBe( "Fox#char( 8217 )#s Latest" )
+					expect( feed.items[ 1 ].title ).toBe( "It#char( 8217 )#s the #char( 8220 )#big one#char( 8221 )# #char( 8212 )# again" )
+					expect( feed.items[ 1 ].authors ).toBe( [ "Ren#char( 233 )#e Doe" ] )
+					expect( feed.items[ 1 ].contentHtml ).toInclude( "it#char( 8230 )# then go #char( 8212 )# fast" )
+				} )
+
+				it( "leaves a feed that's fine alone, even where its text looks mangled", () => {
+					var feed = parser.parse( fixture( "utf8-lookalikes.xml" ) )
+					expect( feed.title ).toBe( "Caf#char( 233 )# Notes" )
+					expect( feed.items[ 1 ].title ).toBe( "#char( 194 )##char( 169 )# and #char( 195 )##char( 169 )# are real here #char( 8212 )# #char( 171 )#fine#char( 187 )# as written" )
+				} )
+
+				it( "still refuses what no repair can fix", () => {
+					expect( () => parser.parse( '<rss version="2.0" version="2.0"><channel><title>Cut off' ) ).toThrow( type = "Feeds.ParseError" )
+				} )
+
+			} )
+
+			describe( "the feed's links and polling hints", () => {
+
+				it( "finds an RSS channel's own address, hubs and next page", () => {
+					expect( show.feedUrl ).toBe( "https://show.example/feed.xml" )
+					expect( show.hubs ).toBe( [ "https://hub.example/", "https://other-hub.example/" ] )
+					expect( show.nextUrl ).toBe( "https://show.example/feed.xml?page=2" )
+					expect( show.link ).toBe( "https://show.example/" )
+				} )
+
+				it( "reads ttl and the hours and days to skip, once each", () => {
+					expect( show.poll ).toBe( { minutes: 180, skipHours: [ 3, 4 ], skipDays: [ "sunday" ] } )
+				} )
+
+				it( "finds an Atom feed's hub, self link, archive and sy:updatePeriod", () => {
+					var feed = parser.parse( fixture( "atom-extras.xml" ), { baseUrl: "https://atom.example/atom.xml" } )
+					expect( feed.feedUrl ).toBe( "https://atom.example/atom.xml" )
+					expect( feed.hubs ).toBe( [ "https://websub.example/hub" ] )
+					expect( feed.nextUrl ).toBe( "https://atom.example/archive/2026-09.xml" )
+					expect( feed.poll.minutes ).toBe( 360 )
+				} )
+
+				it( "reads a JSON Feed's feed_url, next_url and hubs", () => {
+					var feed = parser.parse( fixture( "feed-extras.json" ) )
+					expect( feed.feedUrl ).toBe( "https://json.example/feed.json" )
+					expect( feed.nextUrl ).toBe( "/feed.json?page=2" )
+					expect( parser.parse( fixture( "feed-extras.json" ), { baseUrl: "https://json.example/feed.json" } ).nextUrl ).toBe( "https://json.example/feed.json?page=2" )
+					expect( feed.hubs ).toBe( [ "https://hub.example/" ] )
+				} )
+
+				it( "says nothing when a feed gives no hints", () => {
+					var feed = parser.parse( fixture( "rss20.xml" ) )
+					expect( feed.feedUrl ).toBe( "" )
+					expect( feed.nextUrl ).toBe( "" )
+					expect( feed.hubs ).toBeEmpty()
+					expect( feed.poll ).toBe( { minutes: 0, skipHours: [], skipDays: [] } )
+					expect( feed.podcast ).toBe( { persons: [], funding: [] } )
+				} )
+
+			} )
+
+			describe( "titles, authors and categories", () => {
+
+				it( "decodes entities a feed escaped twice", () => {
+					expect( show.title ).toBe( "Extras & Co" )
+					expect( show.items[ 1 ].title ).toBe( "Episode 2: AT&T <b>loud</b> #char( 8212 )# caf#char( 233 )#" )
+					expect( show.items[ 1 ].categories ).toBe( [ "Technology & Science", "Interviews" ] )
+					expect( parser.parse( fixture( "feed-extras.json" ) ).title ).toBe( "JSON & Extras" )
+					expect( parser.parse( fixture( "feed-extras.json" ) ).items[ 1 ].title ).toBe( "Episode #char( 8212 )# one" )
+				} )
+
+				it( "strips tags only from a title the feed declares as HTML", () => {
+					var feed = parser.parse( fixture( "atom-extras.xml" ) )
+					expect( feed.title ).toBe( "Atom Extras & more" )
+					expect( feed.items[ 1 ].title ).toBe( "<input> considered harmful" )
+				} )
+
+				it( "takes the name from RSS's email (Name)", () => {
+					expect( show.items[ 1 ].authors ).toBe( [ "Grace Hopper" ] )
+					expect( parser.parse( fixture( "rss20.xml" ) ).items[ 2 ].authors ).toBe( [ "Grace Hopper" ] )
+				} )
+
+			} )
+
+			describe( "podcasts and media", () => {
+
+				it( "prefers a show's itunes:image, and reads its hosts and funding", () => {
+					expect( show.image ).toBe( "https://show.example/art/show.jpg" )
+					expect( show.podcast.persons ).toBe( [ { name: "Ada Host", role: "host", url: "https://show.example/people/ada", image: "https://show.example/people/ada.jpg" } ] )
+					expect( show.podcast.funding ).toBe( [ { url: "https://show.example/support", label: "Back us & more" } ] )
+				} )
+
+				it( "reads an episode's length from itunes:duration, in any of its forms", () => {
+					expect( show.items[ 1 ].durationSeconds ).toBe( 2710 )
+					expect( show.items[ 3 ].durationSeconds ).toBe( 95 )
+					// a day or more is a typo, not an episode
+					expect( show.items[ 2 ].durationSeconds ).toBe( 0 )
+				} )
+
+				it( "finds an episode's artwork: itunes:image, a media thumbnail, or a media image", () => {
+					expect( show.items[ 1 ].image ).toBe( "https://show.example/art/ep2.jpg" )
+					expect( show.items[ 2 ].image ).toBe( "https://show.example/thumbs/1.jpg" )
+					expect( show.items[ 3 ].image ).toBe( "https://cdn.example/trailer.png" )
+				} )
+
+				it( "lists transcripts, chapters, people and soundbites, skipping broken ones", () => {
+					var extras = show.items[ 1 ].podcast
+					expect( extras.transcripts ).toBe( [ { url: "https://show.example/2.json", type: "application/json" }, { url: "https://show.example/2.vtt", type: "text/vtt" } ] )
+					expect( extras.chaptersUrl ).toBe( "https://show.example/2.chapters.json" )
+					expect( extras.persons.map( ( person ) => person.name & ":" & person.role ) ).toBe( [ "Grace Guest:guest", "Charles Cohost:host" ] )
+					expect( extras.persons[ 1 ].url ).toBe( "https://grace.example/" )
+					expect( extras.soundbites ).toBe( [ { startTime: 73.5, duration: 60, title: "The best minute" } ] )
+					expect( show.items[ 2 ].podcast ).toBe( { transcripts: [], chaptersUrl: "", persons: [], soundbites: [] } )
+				} )
+
+				it( "adds alternate enclosures to the enclosures", () => {
+					expect( show.items[ 1 ].enclosures ).toBe( [
+						{ url: "https://cdn.example/2.mp3", type: "audio/mpeg", length: 5000 },
+						{ url: "https://show.example/2.opus", type: "audio/opus", length: 777 }
+					] )
+				} )
+
+				it( "finds the comments page, RSS's or Atom's", () => {
+					expect( show.items[ 1 ].commentsUrl ).toBe( "https://show.example/2##comments" )
+					expect( show.items[ 2 ].commentsUrl ).toBe( "" )
+					var atom = parser.parse( fixture( "atom-extras.xml" ), { baseUrl: "https://atom.example/atom.xml" } )
+					expect( atom.items[ 1 ].commentsUrl ).toBe( "https://atom.example/post##comments" )
+				} )
+
+				it( "uses the Media RSS thumbnail and description of a YouTube video", () => {
+					var video = parser.parse( fixture( "youtube.xml" ) ).items[ 1 ]
+					expect( video.id ).toBe( "yt:video:abc123" )
+					expect( video.image ).toBe( "https://img.example/vi/abc123/hqdefault.jpg" )
+					expect( video.contentHtml ).toBe( "We built a thing &amp; filmed it.<br><br>Links: https://example.com/thing" )
+					expect( video.summary ).toBe( "" )
+					expect( video.authors ).toBe( [ "Example Channel" ] )
+				} )
+
+				it( "reads a JSON Feed item's image and its attachment's duration", () => {
+					var items = parser.parse( fixture( "feed-extras.json" ) ).items
+					expect( items[ 1 ].image ).toBe( "https://json.example/img/ep1.jpg" )
+					expect( items[ 1 ].durationSeconds ).toBe( 1805 )
+					expect( items[ 2 ].image ).toBe( "https://json.example/img/banner.jpg" )
+					expect( items[ 2 ].durationSeconds ).toBe( 0 )
+				} )
+
+				it( "gives every item the same keys, whatever the format", () => {
+					var keys = ( item ) => item.keyArray().sort( "text" )
+					var rss = parser.parse( fixture( "rss20.xml" ) )
+					var json = parser.parse( fixture( "feed.json" ) )
+					var atom = parser.parse( fixture( "atom10.xml" ) )
+					expect( keys( json.items[ 1 ] ) ).toBe( keys( rss.items[ 1 ] ) )
+					expect( keys( atom.items[ 1 ] ) ).toBe( keys( rss.items[ 1 ] ) )
+					expect( keys( json ) ).toBe( keys( rss ) )
+					expect( keys( atom ) ).toBe( keys( rss ) )
+					expect( keys( json.items[ 1 ].podcast ) ).toBe( keys( show.items[ 1 ].podcast ) )
+				} )
+
+			} )
+
+			describe( "dates in other formats", () => {
+
+				it( "reads the formats feeds really use", () => {
+					var feed = parser.parse( fixture( "dates.xml" ) )
+					var read = {}
+					for ( var item in feed.items ) {
+						read[ item.id ] = iso( item.published )
+					}
+					expect( read[ "rfc822" ] ).toBe( "2026-11-02T15:00:00Z" )
+					expect( read[ "full-names" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( read[ "sql" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( read[ "sql-offset" ] ).toBe( "2026-11-02T08:00:00Z" )
+					expect( read[ "us" ] ).toBe( "2026-11-02T15:15:00Z" )
+					expect( read[ "date-only" ] ).toBe( "2026-11-02T00:00:00Z" )
+					expect( read[ "asctime" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( read[ "trailing" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( read[ "shouting" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( read[ "dc" ] ).toBe( "2026-11-02T10:00:00Z" )
+					expect( iso( feed.updated ) ).toBe( "2026-11-03T09:30:00Z" )
+				} )
+
+				it( "still returns null for what isn't a date", () => {
+					var feed = parser.parse( fixture( "dates.xml" ) )
+					for ( var item in feed.items ) {
+						if ( [ "nonsense", "impossible", "empty" ].contains( item.id ) ) {
+							expect( isNull( item.published ) ).toBeTrue( item.id )
+						}
+					}
+					expect( feed.items.len() ).toBe( 13 )
+				} )
+
+				it( "reads a JSON Feed date that isn't RFC 3339", () => {
+					expect( iso( parser.parse( fixture( "feed-extras.json" ) ).items[ 1 ].published ) ).toBe( "2026-11-02T10:00:00Z" )
+				} )
+
+			} )
+
+			describe( "URLs in srcset and style", () => {
+
+				it( "resolves each candidate of a srcset", () => {
+					var html = show.items[ 1 ].contentHtml
+					expect( html ).toInclude( 'srcset="https://show.example/small.jpg 1x, https://show.example/big.jpg 2x, https://cdn.example/huge.jpg 3x"' )
+					expect( html ).toInclude( '<source srcset="https://show.example/one.webp 480w, https://show.example/two.webp 800w">' )
+				} )
+
+				it( "resolves url() in a style attribute, leaving data: alone", () => {
+					var html = show.items[ 1 ].contentHtml
+					expect( html ).toInclude( "url('https://show.example/bg.png') no-repeat" )
+					expect( html ).toInclude( "mask: url(data:image/png;base64,AAAA)" )
+				} )
+
+			} )
+
+		} )
+
+	}
+
+}
