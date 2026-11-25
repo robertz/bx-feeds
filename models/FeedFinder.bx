@@ -1,0 +1,148 @@
+/**
+ * Turns whatever address someone pasted into the feeds behind it:
+ *
+ *   feeds = new bxModules.bxFeeds.models.FeedFinder().find( "example.com/blog" )
+ *   // [ { url, title, link, type, source } ]
+ *
+ * In order: the address itself when it is a feed; the feeds its page advertises
+ * with <link rel="alternate">; a site whose feed address is known from its
+ * page's (Reddit, GitHub, Mastodon); and the paths feeds usually live at. Every
+ * feed returned was fetched and parsed. The first step that finds any ends the
+ * search. An empty array means nothing was found.
+ */
+class {
+
+	static {
+		PAGE_ACCEPT = "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8"
+		// the last is Arc XP's (local TV and newspaper sites), which their pages don't advertise
+		COMMON_PATHS = [ "/feed", "/rss", "/feed.xml", "/rss.xml", "/atom.xml", "/index.xml", "/feed/", "/feed.json", "/arc/outboundfeeds/rss/?outputType=xml" ]
+		// a page can advertise any number of feeds, each one a fetch
+		MAX_ADVERTISED = 5
+	}
+
+	/** overrides: any of the module's settings, as for FeedFetcher. */
+	function init( struct overrides = {} ) {
+		variables.fetcher = new FeedFetcher( arguments.overrides )
+		variables.parser = new FeedParser()
+		variables.discovery = new FeedDiscovery()
+		return this
+	}
+
+	/**
+	 * pageUrl: a feed's or a page's address; https:// is assumed when it has no scheme.
+	 * options: { budgetSeconds: the longest the whole search may take, 60 by default;
+	 *            and FeedFetcher.fetch()'s, used for every request }
+	 * A page that can't be reached at all throws Feeds.FetchError; a candidate that
+	 * can't is skipped.
+	 */
+	array function find( required string pageUrl, struct options = {} ) {
+		var start = trim( arguments.pageUrl )
+		if ( !reFindNoCase( "^[a-z][a-z0-9+.-]*://", start ) ) {
+			start = "https://" & start
+		}
+		var settings = duplicate( arguments.options )
+		var deadline = getTickCount() + val( settings.budgetSeconds ?: 60 ) * 1000
+		var page = variables.fetcher.fetch( start, duplicate( settings ).append( { parse: false, accept: static.PAGE_ACCEPT, etag: "", lastModified: "" } ) )
+		var landed = page.finalUrl
+
+		if ( page.status == 200 ) {
+			var itself = parsed( page.body, page.contentType, landed )
+			if ( !itself.isEmpty() ) {
+				return [ described( itself, len( page.permanentUrl ) ? page.permanentUrl : start, "itself" ) ]
+			}
+			var found = []
+			var html = ""
+			try {
+				html = variables.parser.documentText( page.body, page.contentType )
+			} catch ( "Feeds.ParseError" e ) {
+				// an empty page advertises nothing
+			}
+			var advertised = variables.discovery.discover( html, landed )
+			for ( var candidate in advertised.slice( 1, min( advertised.len(), static.MAX_ADVERTISED ) ) ) {
+				var feed = probe( candidate.url, settings, deadline, "advertised" )
+				if ( !feed.isEmpty() ) {
+					found.append( feed )
+				}
+			}
+			if ( found.len() ) {
+				return found
+			}
+		}
+
+		var guesses = knownPatterns( landed ).map( ( address ) => { return { url: address, source: "pattern" } } )
+		for ( var path in static.COMMON_PATHS ) {
+			guesses.append( { url: variables.parser.resolveUrl( path, landed ), source: "path" } )
+		}
+		for ( var guess in guesses ) {
+			var feed = probe( guess.url, settings, deadline, guess.source )
+			if ( !feed.isEmpty() ) {
+				return [ feed ]
+			}
+		}
+		return []
+	}
+
+	/** Sites whose feeds are at an address that follows from the page's, but aren't advertised (or the page needs JavaScript). */
+	array function knownPatterns( required string pageUrl ) {
+		var uri = ""
+		try {
+			uri = createObject( "java", "java.net.URI" ).init( arguments.pageUrl )
+		} catch ( any e ) {
+			return []
+		}
+		var host = reReplace( lcase( uri.getHost() ?: "" ), "^(www|old)\.", "" )
+		var path = reReplace( uri.getPath() ?: "", "/+$", "" )
+		if ( host == "reddit.com" && reFind( "^/(r|user)/[^/]+", path ) ) {
+			return [ "https://www.reddit.com" & path & "/.rss" ]
+		}
+		if ( host == "github.com" ) {
+			var parts = listToArray( path, "/" )
+			if ( parts.len() == 2 ) {
+				return [ "https://github.com/#parts[ 1 ]#/#parts[ 2 ]#/releases.atom" ]
+			}
+			if ( parts.len() == 1 ) {
+				return [ "https://github.com/#parts[ 1 ]#.atom" ]
+			}
+		}
+		// Mastodon profiles and hashtags: the page answers a feed reader with HTML, but the same address with .rss is the feed
+		if ( reFind( "^/(@[^/]+|tags/[^/]+)$", path ) ) {
+			return [ "#uri.getScheme()#://#uri.getRawAuthority()##path#.rss" ]
+		}
+		return []
+	}
+
+	/** A candidate fetched and parsed: its description, or {} when it isn't a feed, can't be reached, or time has run out. */
+	private struct function probe( required string candidate, required struct settings, required numeric deadline, required string source ) {
+		var left = ( arguments.deadline - getTickCount() ) / 1000
+		if ( left < 1 ) {
+			return {}
+		}
+		try {
+			var limits = duplicate( arguments.settings ).append( { parse: false, etag: "", lastModified: "" } )
+			limits.timeoutSeconds = min( left, val( limits.timeoutSeconds ?: left ) )
+			limits.delete( "accept" )
+			var response = variables.fetcher.fetch( arguments.candidate, limits )
+			if ( response.status != 200 ) {
+				return {}
+			}
+			var feed = parsed( response.body, response.contentType, response.finalUrl )
+			// the address asked for is kept unless the server said the move is permanent
+			return feed.isEmpty() ? {} : described( feed, len( response.permanentUrl ) ? response.permanentUrl : arguments.candidate, arguments.source )
+		} catch ( "Feeds.FetchError" e ) {
+			return {}
+		}
+	}
+
+	private struct function parsed( required body, required string contentType, required string baseUrl ) {
+		try {
+			return variables.parser.parse( arguments.body, { baseUrl: arguments.baseUrl, contentType: arguments.contentType, maxItems: 1 } )
+		} catch ( "Feeds.ParseError" e ) {
+			return {}
+		}
+	}
+
+	private struct function described( required struct feed, required string address, required string source ) {
+		return { url: arguments.address, title: arguments.feed.title, link: arguments.feed.link, type: arguments.feed.type, source: arguments.source }
+	}
+
+}

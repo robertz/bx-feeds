@@ -1,0 +1,122 @@
+/**
+ * The subscriber's side of WebSub (and PubSubHubbub before it): ask a feed's
+ * hub to push new content, answer the hub's check, and verify what it pushes.
+ * You keep the state (which callback is for which feed, its secret, its lease)
+ * and serve the callback; this does the protocol.
+ *
+ *   hub = new bxModules.bxFeeds.models.WebSub()
+ *   secret = hub.newSecret()
+ *   hub.subscribe( feed.hubs[ 1 ], feed.feedUrl, "https://example.com/websub/#token#", { secret: secret } )
+ *
+ *   // GET on the callback: the hub checking you asked
+ *   check = hub.challenge( queryParams, feed.feedUrl )
+ *   if ( check.accepted ) reply 200 with check.challenge, else reply 404
+ *
+ *   // POST on the callback: new content
+ *   if ( hub.isSigned( rawBody, headers[ "X-Hub-Signature" ], secret ) ) feed = parseFeed( rawBody )
+ */
+class {
+
+	static {
+		ALGORITHMS = { sha1: "HmacSHA1", sha256: "HmacSHA256", sha384: "HmacSHA384", sha512: "HmacSHA512" }
+		RANDOM = createObject( "java", "java.security.SecureRandom" ).init()
+	}
+
+	/** overrides: any of the module's settings, as for FeedFetcher; they apply to requests to hubs. */
+	function init( struct overrides = {} ) {
+		variables.fetcher = new FeedFetcher( arguments.overrides )
+		return this
+	}
+
+	/**
+	 * Asks the hub to start pushing topicUrl (the feed's own address, its
+	 * feedUrl) to callbackUrl. The hub answers at once and checks later with a
+	 * GET to the callback: see challenge().
+	 * options: { secret: what pushes will be signed with (see newSecret()),
+	 *            leaseSeconds: how long you'd like the subscription to last, 864000 (10 days) by default }
+	 * @return { accepted: the hub took the request (a 2xx), status, body: the first 2 KB of its answer }
+	 * Throws Feeds.FetchError when the hub can't be reached or isn't a public address.
+	 */
+	struct function subscribe( required string hubUrl, required string topicUrl, required string callbackUrl, struct options = {} ) {
+		var fields = {
+			"hub.mode"          : "subscribe",
+			"hub.topic"         : arguments.topicUrl,
+			"hub.callback"      : arguments.callbackUrl,
+			"hub.lease_seconds" : int( val( arguments.options.leaseSeconds ?: 864000 ) ),
+			// PubSubHubbub 0.3 requires it, and WordPress's PuSHPress hub still speaks 0.3; WebSub hubs ignore it
+			"hub.verify"        : "async"
+		}
+		if ( len( arguments.options.secret ?: "" ) ) {
+			fields[ "hub.secret" ] = arguments.options.secret
+		}
+		return asked( arguments.hubUrl, fields )
+	}
+
+	/** Asks the hub to stop. It checks with a GET to the callback, as for subscribe(). */
+	struct function unsubscribe( required string hubUrl, required string topicUrl, required string callbackUrl ) {
+		return asked( arguments.hubUrl, {
+			"hub.mode"     : "unsubscribe",
+			"hub.topic"    : arguments.topicUrl,
+			"hub.callback" : arguments.callbackUrl,
+			"hub.verify"   : "async"
+		} )
+	}
+
+	/**
+	 * Reads the hub's GET to your callback. params: the request's query
+	 * parameters; topicUrl: the topic this callback was registered for.
+	 * @return { mode: "subscribe", "unsubscribe", "denied" or "",
+	 *           accepted: it's a subscribe or unsubscribe for this topic, with a challenge: reply 200 with the challenge as the body.
+	 *                     Otherwise reply 404, unless you no longer want an unsubscribe you didn't ask for,
+	 *           challenge, leaseSeconds: how long the hub will keep pushing (0 when it doesn't say),
+	 *           reason: why the hub refused, when mode is "denied" }
+	 */
+	struct function challenge( required struct params, required string topicUrl ) {
+		var mode = lcase( trim( toString( arguments.params[ "hub.mode" ] ?: "" ) ) )
+		var lease = trim( toString( arguments.params[ "hub.lease_seconds" ] ?: "" ) )
+		var answer = {
+			mode         : [ "subscribe", "unsubscribe", "denied" ].contains( mode ) ? mode : "",
+			accepted     : false,
+			challenge    : toString( arguments.params[ "hub.challenge" ] ?: "" ),
+			leaseSeconds : isNumeric( lease ) && lease > 0 ? int( lease ) : 0,
+			reason       : mode == "denied" ? toString( arguments.params[ "hub.reason" ] ?: "" ) : ""
+		}
+		answer.accepted = ( answer.mode == "subscribe" || answer.mode == "unsubscribe" )
+			&& len( answer.challenge ) > 0
+			&& compare( toString( arguments.params[ "hub.topic" ] ?: "" ), arguments.topicUrl ) == 0
+		return answer
+	}
+
+	/**
+	 * Whether a pushed body is signed with the subscription's secret.
+	 * body: the request body exactly as it arrived, bytes or a string;
+	 * signature: its X-Hub-Signature header, "sha256=<hex>" (or sha1, sha384, sha512).
+	 * Reply 2xx to the hub either way, as the spec asks, and ignore a body that isn't signed.
+	 */
+	boolean function isSigned( required body, required string signature, required string secret ) {
+		var parts = listToArray( trim( arguments.signature ), "=" )
+		if ( parts.len() != 2 || !static.ALGORITHMS.keyExists( lcase( parts[ 1 ] ) ) || !len( arguments.secret ) ) {
+			return false
+		}
+		var algorithm = static.ALGORITHMS[ lcase( parts[ 1 ] ) ]
+		var mac = createObject( "java", "javax.crypto.Mac" ).getInstance( algorithm )
+		mac.init( createObject( "java", "javax.crypto.spec.SecretKeySpec" ).init( arguments.secret.getBytes( "UTF-8" ), algorithm ) )
+		var bytes = isBinary( arguments.body ) ? arguments.body : toString( arguments.body ).getBytes( "UTF-8" )
+		var expected = createObject( "java", "java.util.HexFormat" ).of().formatHex( mac.doFinal( bytes ) )
+		// compared in constant time
+		return createObject( "java", "java.security.MessageDigest" ).isEqual( expected.getBytes( "UTF-8" ), lcase( trim( parts[ 2 ] ) ).getBytes( "UTF-8" ) )
+	}
+
+	/** A random secret for one subscription: 64 hex characters. */
+	string function newSecret() {
+		var bytes = createObject( "java", "java.nio.ByteBuffer" ).allocate( 32 ).array()
+		static.RANDOM.nextBytes( bytes )
+		return createObject( "java", "java.util.HexFormat" ).of().formatHex( bytes )
+	}
+
+	private struct function asked( required string hubUrl, required struct fields ) {
+		var answer = variables.fetcher.postForm( arguments.hubUrl, arguments.fields )
+		return { accepted: answer.status >= 200 && answer.status <= 299, status: answer.status, body: answer.body }
+	}
+
+}

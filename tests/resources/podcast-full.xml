@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:podcast="https://podcastindex.org/namespace/1.0">
+<channel>
+<title>Full Show</title>
+<link>https://full.example/</link>
+<description>Every tag</description>
+<itunes:author>Full Media &amp;amp; Friends</itunes:author>
+<itunes:owner><itunes:name>Olive Owner</itunes:name><itunes:email>olive@full.example</itunes:email></itunes:owner>
+<itunes:type>Serial</itunes:type>
+<itunes:explicit>true</itunes:explicit>
+<itunes:complete>Yes</itunes:complete>
+<itunes:new-feed-url>https://new.full.example/feed.xml</itunes:new-feed-url>
+<itunes:category text="Technology"><itunes:category text="Tech News"/></itunes:category>
+<itunes:category text="Society &amp; Culture"/>
+<podcast:guid>917393e3-1b1e-5cef-ace4-edaa54e1f810</podcast:guid>
+<podcast:locked owner="olive@full.example">yes</podcast:locked>
+<podcast:medium>Music</podcast:medium>
+<podcast:location geo="geo:30.2672,97.7431" osm="R113314">Austin, TX</podcast:location>
+<podcast:value type="lightning" method="keysend" suggested="0.00000005000">
+	<podcast:valueRecipient name="Host" type="node" address="02abc" split="90"/>
+	<podcast:valueRecipient name="App" type="node" address="03def" split="10" fee="true" customKey="696969" customValue="xyz"/>
+	<podcast:valueRecipient name="No address" split="5"/>
+</podcast:value>
+<podcast:liveItem status="LIVE" start="2026-11-02T18:00:00-05:00" end="not a date">
+	<title>Live: Q&amp;amp;A</title>
+	<guid>live-1</guid>
+	<link>/live</link>
+	<enclosure url="/live.mp3" type="audio/mpeg" length="312"/>
+	<podcast:contentLink href="https://stream.example/full">Watch the stream</podcast:contentLink>
+	<podcast:contentLink href="javascript:alert(1)">Bad</podcast:contentLink>
+</podcast:liveItem>
+<item>
+<title>S2E5 with both</title>
+<guid isPermaLink="false">s2e5</guid>
+<itunes:season>1</itunes:season>
+<itunes:episode>4</itunes:episode>
+<itunes:episodeType>Bonus</itunes:episodeType>
+<itunes:explicit>false</itunes:explicit>
+<podcast:season name="Second">2</podcast:season>
+<podcast:episode display="Ch.5">5</podcast:episode>
+<podcast:location geo="geo:51.5,-0.12">London</podcast:location>
+<podcast:value type="lightning" method="keysend"><podcast:valueRecipient name="Guest" type="node" address="04aaa" split="100"/></podcast:value>
+</item>
+<item>
+<title>iTunes only</title>
+<guid isPermaLink="false">itunes-only</guid>
+<itunes:season>3</itunes:season>
+<itunes:episode>12</itunes:episode>
+<itunes:episodeType>trailer</itunes:episodeType>
+<itunes:explicit>yes</itunes:explicit>
+</item>
+<item><title>Nothing</title><guid isPermaLink="false">nothing</guid></item>
+</channel>
+</rss>

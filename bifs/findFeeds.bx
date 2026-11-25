@@ -1,0 +1,16 @@
+/**
+ * The feeds behind an address someone pasted: the address itself if it's a
+ * feed, else the feeds its page advertises, else a known site pattern or a
+ * common path. Each one returned was fetched and parsed.
+ *
+ *   feeds = findFeeds( "example.com/blog" )
+ *   // [ { url, title, link, type, source } ]
+ */
+@BoxBIF
+class {
+
+	function invoke( required string pageUrl, struct options = {} ) {
+		return new bxModules.bxFeeds.models.FeedFinder().find( arguments.pageUrl, arguments.options )
+	}
+
+}

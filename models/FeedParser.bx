@@ -124,6 +124,12 @@ class {
 		feed.hubs = feed.hubs.filter( ( hub ) => len( web( hub ) ) > 0 )
 		feed.podcast.persons = people( feed.podcast.persons )
 		feed.podcast.funding = feed.podcast.funding.filter( ( fund ) => len( web( fund.url ) ) > 0 )
+		feed.podcast.newFeedUrl = web( feed.podcast.newFeedUrl )
+		for ( var live in feed.podcast.liveItems ) {
+			live.link = web( live.link )
+			live.enclosures = live.enclosures.filter( ( enclosure ) => len( web( enclosure.url ) ) > 0 )
+			live.contentLinks = live.contentLinks.filter( ( content ) => len( web( content.url ) ) > 0 )
+		}
 		for ( var item in feed.items ) {
 			for ( var key in [ "link", "commentsUrl", "image" ] ) {
 				item[ key ] = web( item[ key ] )
@@ -239,7 +245,7 @@ class {
 			hubs        : links.hubs,
 			nextUrl     : links.next,
 			poll        : pollOf( synd ),
-			podcast     : { persons: extras.persons, funding: extras.funding },
+			podcast     : showOf( synd.getModule( static.ITUNES ), extras ),
 			items       : items
 		}
 	}
@@ -456,7 +462,7 @@ class {
 			image       : len( image ) ? resolveUrl( image, contentBase ) : media.image,
 			// a day or more is a typo, not an episode
 			durationSeconds : seconds > 0 && seconds < 86400 ? seconds : 0,
-			podcast     : { transcripts: extras.transcripts, chaptersUrl: extras.chaptersUrl, persons: extras.persons, soundbites: extras.soundbites }
+			podcast     : episodeOf( arguments.entry.getModule( static.ITUNES ), extras )
 		}
 	}
 
@@ -656,10 +662,17 @@ class {
 	 * channel's elements.
 	 * @return { transcripts: [ { url, type } ], chaptersUrl, persons: [ { name, role, url, image } ],
 	 *           funding: [ { url, label } ], soundbites: [ { startTime, duration, title } ],
-	 *           alternates: enclosures from podcast:alternateEnclosure }
+	 *           alternates: enclosures from podcast:alternateEnclosure,
+	 *           guid, locked, medium, season, episode, location: { name, geo, osm },
+	 *           value: see valueOf(), liveItems: see liveItemOf() }
 	 */
 	private struct function podcastOf( required markup, required string base ) {
-		var found = { transcripts: [], chaptersUrl: "", persons: [], funding: [], soundbites: [], alternates: [] }
+		var found = {
+			transcripts: [], chaptersUrl: "", persons: [], funding: [], soundbites: [], alternates: [],
+			guid: "", locked: false, medium: "", season: 0, episode: 0, liveItems: [],
+			location: { name: "", geo: "", osm: "" },
+			value: { type: "", method: "", suggested: 0, recipients: [] }
+		}
 		for ( var element in arguments.markup ) {
 			if ( !static.PODCAST.contains( element.getNamespaceURI() ) ) {
 				continue
@@ -699,6 +712,34 @@ class {
 						found.soundbites.append( { startTime: start + 0, duration: length + 0, title: text } )
 					}
 					break
+				case "guid":
+					found.guid = text
+					break
+				case "locked":
+					found.locked = lcase( text ) == "yes"
+					break
+				case "medium":
+					found.medium = lcase( text )
+					break
+				case "season":
+				case "episode":
+					if ( isNumeric( text ) && text > 0 ) {
+						found[ element.getName() ] = text + 0
+					}
+					break
+				case "location":
+					if ( !len( found.location.name ) ) {
+						found.location = { name: text, geo: trim( element.getAttributeValue( "geo" ) ?: "" ), osm: trim( element.getAttributeValue( "osm" ) ?: "" ) }
+					}
+					break
+				case "value":
+					if ( !found.value.recipients.len() ) {
+						found.value = valueOf( element )
+					}
+					break
+				case "liveItem":
+					found.liveItems.append( liveItemOf( element, arguments.base ) )
+					break
 				case "alternateEnclosure":
 					for ( var source in element.getChildren() ) {
 						var sourceUrl = source.getName() == "source" ? resolveUrl( source.getAttributeValue( "uri" ) ?: "", arguments.base ) : ""
@@ -716,6 +757,124 @@ class {
 			}
 		}
 		return found
+	}
+
+	/** podcast:value, how listeners can pay a show: { type, method, suggested, recipients: [ { name, type, address, split, fee, customKey, customValue } ] } */
+	private struct function valueOf( required element ) {
+		var suggested = trim( arguments.element.getAttributeValue( "suggested" ) ?: "" )
+		var value = {
+			type       : lcase( trim( arguments.element.getAttributeValue( "type" ) ?: "" ) ),
+			method     : lcase( trim( arguments.element.getAttributeValue( "method" ) ?: "" ) ),
+			suggested  : isNumeric( suggested ) && suggested > 0 ? suggested + 0 : 0,
+			recipients : []
+		}
+		for ( var recipient in arguments.element.getChildren() ) {
+			var split = trim( recipient.getAttributeValue( "split" ) ?: "" )
+			var address = trim( recipient.getAttributeValue( "address" ) ?: "" )
+			if ( recipient.getName() == "valueRecipient" && len( address ) ) {
+				value.recipients.append( {
+					name        : plain( recipient.getAttributeValue( "name" ) ?: "" ),
+					type        : lcase( trim( recipient.getAttributeValue( "type" ) ?: "" ) ),
+					address     : address,
+					split       : isNumeric( split ) && split > 0 ? split + 0 : 0,
+					fee         : lcase( trim( recipient.getAttributeValue( "fee" ) ?: "" ) ) == "true",
+					customKey   : trim( recipient.getAttributeValue( "customKey" ) ?: "" ),
+					customValue : trim( recipient.getAttributeValue( "customValue" ) ?: "" )
+				} )
+			}
+		}
+		return value
+	}
+
+	/**
+	 * podcast:liveItem, a stream that is coming, on now or over:
+	 * { status, start, end (UTC datetimes or null), id, title, link, enclosures, contentLinks: [ { url, label } ] }
+	 */
+	private struct function liveItemOf( required element, required string base ) {
+		var live = {
+			status : lcase( trim( arguments.element.getAttributeValue( "status" ) ?: "" ) ),
+			start  : jsonDate( arguments.element.getAttributeValue( "start" ) ?: "" ),
+			end    : jsonDate( arguments.element.getAttributeValue( "end" ) ?: "" ),
+			id : "", title : "", link : "", enclosures : [], contentLinks : []
+		}
+		for ( var part in arguments.element.getChildren() ) {
+			switch ( part.getName() ) {
+				case "guid":
+					live.id = trim( part.getText() )
+					break
+				case "title":
+					live.title = plain( part.getText() )
+					break
+				case "link":
+					live.link = resolveUrl( part.getText(), arguments.base )
+					break
+				case "enclosure":
+					var size = trim( part.getAttributeValue( "length" ) ?: "" )
+					if ( len( trim( part.getAttributeValue( "url" ) ?: "" ) ) ) {
+						live.enclosures.append( {
+							url    : resolveUrl( part.getAttributeValue( "url" ), arguments.base ),
+							type   : trim( part.getAttributeValue( "type" ) ?: "" ),
+							length : isNumeric( size ) && size > 0 ? size + 0 : 0
+						} )
+					}
+					break
+				case "contentLink":
+					if ( len( trim( part.getAttributeValue( "href" ) ?: "" ) ) ) {
+						live.contentLinks.append( { url: resolveUrl( part.getAttributeValue( "href" ), arguments.base ), label: plain( part.getText() ) } )
+					}
+					break
+			}
+		}
+		return live
+	}
+
+	/** A feed's podcast struct, from its iTunes tags (null when it has none) and its Podcasting 2.0 ones. */
+	private struct function showOf( itunes, required struct extras ) {
+		var show = {
+			persons : arguments.extras.persons, funding : arguments.extras.funding,
+			author : "", owner : { name: "", email: "" }, type : "", explicit : false, complete : false, newFeedUrl : "", categories : [],
+			guid : arguments.extras.guid, locked : arguments.extras.locked, medium : arguments.extras.medium,
+			location : arguments.extras.location, value : arguments.extras.value, liveItems : arguments.extras.liveItems
+		}
+		if ( isNull( arguments.itunes ) ) {
+			return show
+		}
+		show.author = plain( arguments.itunes.getAuthor() ?: "" )
+		show.owner = { name: plain( arguments.itunes.getOwnerName() ?: "" ), email: trim( arguments.itunes.getOwnerEmailAddress() ?: "" ) }
+		show.type = lcase( trim( arguments.itunes.getType() ?: "" ) )
+		show.explicit = arguments.itunes.getExplicitNullable() ?: false
+		show.complete = arguments.itunes.getComplete()
+		show.newFeedUrl = trim( arguments.itunes.getNewFeedUrl() ?: "" )
+		for ( var category in arguments.itunes.getCategories() ?: [] ) {
+			var name = plain( category.getName() ?: "" )
+			addOnce( show.categories, name )
+			for ( var sub in category.getSubcategories() ?: [] ) {
+				addOnce( show.categories, name & " > " & plain( sub.getName() ?: "" ) )
+			}
+		}
+		return show
+	}
+
+	/** An item's podcast struct, from its iTunes tags (null when it has none) and its Podcasting 2.0 ones, which win. */
+	private struct function episodeOf( itunes, required struct extras ) {
+		var episode = {
+			transcripts : arguments.extras.transcripts, chaptersUrl : arguments.extras.chaptersUrl,
+			persons : arguments.extras.persons, soundbites : arguments.extras.soundbites,
+			season : arguments.extras.season, episode : arguments.extras.episode, episodeType : "", explicit : false,
+			location : arguments.extras.location, value : arguments.extras.value
+		}
+		if ( isNull( arguments.itunes ) ) {
+			return episode
+		}
+		if ( episode.season == 0 ) {
+			episode.season = arguments.itunes.getSeason() ?: 0
+		}
+		if ( episode.episode == 0 ) {
+			episode.episode = arguments.itunes.getEpisode() ?: 0
+		}
+		episode.episodeType = lcase( trim( arguments.itunes.getEpisodeType() ?: "" ) )
+		episode.explicit = arguments.itunes.getExplicitNullable() ?: false
+		return episode
 	}
 
 	/** JSON Feed 1.0 and 1.1 (jsonfeed.org), mapped to the shape ROME's feeds get. */
@@ -758,7 +917,7 @@ class {
 			hubs        : hubs,
 			nextUrl     : resolveUrl( jsonText( doc, "next_url" ), arguments.baseUrl ),
 			poll        : { minutes: 0, skipHours: [], skipDays: [] },
-			podcast     : { persons: [], funding: [] },
+			podcast     : showOf( javacast( "null", "" ), podcastOf( [], "" ) ),
 			items       : items
 		}
 	}
@@ -813,7 +972,7 @@ class {
 			commentsUrl : "",
 			image       : resolveUrl( len( image ) ? image : jsonText( arguments.entry, "banner_image" ), contentBase ),
 			durationSeconds : seconds,
-			podcast     : { transcripts: [], chaptersUrl: "", persons: [], soundbites: [] }
+			podcast     : episodeOf( javacast( "null", "" ), podcastOf( [], "" ) )
 		}
 	}
 

@@ -1,0 +1,15 @@
+/**
+ * A WebSub subscriber: subscribe to a feed's hub, answer its check, verify its pushes.
+ * overrides: module settings for requests to hubs.
+ *
+ *   hub = webSub()
+ *   hub.subscribe( feed.hubs[ 1 ], feed.feedUrl, callbackUrl, { secret: hub.newSecret() } )
+ */
+@BoxBIF
+class {
+
+	function invoke( struct overrides = {} ) {
+		return new bxModules.bxFeeds.models.WebSub( arguments.overrides )
+	}
+
+}

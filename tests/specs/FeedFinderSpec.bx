@@ -1,0 +1,163 @@
+/** findFeeds() against a local server standing in for a site. */
+class extends="testbox.system.BaseSpec" {
+
+	function fixture( required string name ) {
+		return fileReadBinary( getDirectoryFromPath( getCurrentTemplatePath() ) & "../resources/" & arguments.name )
+	}
+
+	function beforeAll() {
+		variables.finder = new bxModules.bxFeeds.models.FeedFinder( { allowPrivateAddresses: true } )
+		variables.site = new tests.helpers.FeedServer()
+		var site = variables.site
+		var rss = fixture( "rss20.xml" )
+		var atom = fixture( "atom10.xml" )
+		var html = ( head ) => { return { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" }, body: "<!doctype html><html><head><title>A page</title>#head#</head><body>Hello</body></html>" } }
+
+		site.on( "/posts.xml", ( headers ) => { return { status: 200, body: rss } } )
+		site.on( "/atom.xml", ( headers ) => { return { status: 200, body: atom } } )
+		site.on( "/old.xml", ( headers ) => { return { status: 301, headers: { "Location": "/posts.xml" } } } )
+		site.on( "/blog", ( headers ) => html( '<link rel="alternate" type="application/rss+xml" title="Posts" href="/posts.xml"><link rel="alternate" type="application/atom+xml" href="atom.xml"><link rel="alternate" type="application/rss+xml" href="/gone.xml"><link rel="alternate" type="application/rss+xml" href="/not-a-feed">' ) )
+		site.on( "/not-a-feed", ( headers ) => html( "" ) )
+		site.on( "/moved-blog", ( headers ) => html( '<link rel="alternate" type="application/rss+xml" href="/old.xml">' ) )
+		site.on( "/many", ( headers ) => {
+			var links = ""
+			for ( var i = 1; i <= 8; i++ ) {
+				links &= '<link rel="alternate" type="application/rss+xml" href="/many/#i#.xml">'
+			}
+			return html( links )
+		} )
+		for ( var i = 1; i <= 8; i++ ) {
+			site.on( "/many/#i#.xml", ( headers ) => { return { status: 200, body: rss } } )
+		}
+		site.on( "/@ada", ( headers ) => html( "" ) )
+		site.on( "/@ada.rss", ( headers ) => { return { status: 200, body: rss } } )
+		site.on( "/broken-advert", ( headers ) => html( '<link rel="alternate" type="application/rss+xml" href="/gone.xml">' ) )
+	}
+
+	function afterAll() {
+		variables.site.stop()
+	}
+
+	function run() {
+
+		describe( "FeedFinder", () => {
+
+			it( "returns an address that is already a feed", () => {
+				var found = finder.find( site.at( "/posts.xml" ) )
+				expect( found ).toBe( [ { url: site.at( "/posts.xml" ), title: "Example Blog", link: "https://blog.example/", type: "rss_2.0", source: "itself" } ] )
+			} )
+
+			it( "asks for the page as a page", () => {
+				finder.find( site.at( "/blog" ) )
+				expect( site.hits( "/blog" ).last().headers[ "Accept" ] ).toInclude( "text/html" )
+				expect( site.hits( "/posts.xml" ).last().headers[ "Accept" ] ).toInclude( "application/rss+xml" )
+			} )
+
+			it( "lists every feed a page advertises that really is one", () => {
+				var found = finder.find( site.at( "/blog" ) )
+				expect( found.map( ( feed ) => feed.url ) ).toBe( [ site.at( "/posts.xml" ), site.at( "/atom.xml" ) ] )
+				expect( found[ 1 ].source ).toBe( "advertised" )
+				expect( found[ 2 ].type ).toBe( "atom_1.0" )
+				expect( found[ 2 ].title ).toBe( "Atom Example" )
+			} )
+
+			it( "reports where an advertised feed has permanently moved", () => {
+				expect( finder.find( site.at( "/moved-blog" ) )[ 1 ].url ).toBe( site.at( "/posts.xml" ) )
+				expect( finder.find( site.at( "/old.xml" ) )[ 1 ].url ).toBe( site.at( "/posts.xml" ) )
+			} )
+
+			it( "tries at most five advertised feeds", () => {
+				var before = site.hits().len()
+				expect( finder.find( site.at( "/many" ) ).len() ).toBe( 5 )
+				expect( site.hits().len() - before ).toBe( 6 )
+			} )
+
+			it( "knows a Mastodon profile's feed, which its page doesn't advertise", () => {
+				var found = finder.find( site.at( "/@ada" ) )
+				expect( found.len() ).toBe( 1 )
+				expect( found[ 1 ].url ).toBe( site.at( "/@ada.rss" ) )
+				expect( found[ 1 ].source ).toBe( "pattern" )
+			} )
+
+			it( "falls back to the paths feeds usually live at, stopping at the first", () => {
+				var plain = new tests.helpers.FeedServer()
+				var rss = fixture( "rss20.xml" )
+				try {
+					plain.on( "/", ( headers ) => { return { status: 200, headers: { "Content-Type": "text/html" }, body: "<html><body>No links here</body></html>" } } )
+					plain.on( "/rss.xml", ( headers ) => { return { status: 200, body: rss } } )
+					plain.on( "/atom.xml", ( headers ) => { return { status: 200, body: rss } } )
+					var found = finder.find( plain.at( "/" ) )
+					expect( found ).toBe( [ { url: plain.at( "/rss.xml" ), title: "Example Blog", link: "https://blog.example/", type: "rss_2.0", source: "path" } ] )
+					expect( plain.hits( "/atom.xml" ) ).toBeEmpty()
+					expect( plain.hits( "/feed" ).len() ).toBe( 1 )
+				} finally {
+					plain.stop()
+				}
+			} )
+
+			it( "still probes when the page itself is missing, and when its only advertised feed is", () => {
+				var plain = new tests.helpers.FeedServer()
+				var rss = fixture( "rss20.xml" )
+				try {
+					plain.on( "/feed", ( headers ) => { return { status: 200, body: rss } } )
+					expect( finder.find( plain.at( "/no-such-page" ) )[ 1 ].url ).toBe( plain.at( "/feed" ) )
+				} finally {
+					plain.stop()
+				}
+			} )
+
+			it( "returns nothing when there's nothing to find", () => {
+				var bare = new tests.helpers.FeedServer()
+				try {
+					bare.on( "/", ( headers ) => { return { status: 200, headers: { "Content-Type": "text/html" }, body: '<html><head><link rel="alternate" type="application/rss+xml" href="/gone.xml"></head></html>' } } )
+					bare.on( "/empty", ( headers ) => { return { status: 200 } } )
+					expect( finder.find( bare.at( "/" ) ) ).toBeEmpty()
+					expect( finder.find( bare.at( "/nowhere" ) ) ).toBeEmpty()
+					expect( finder.find( bare.at( "/empty" ) ) ).toBeEmpty()
+					// the page, the feed it advertises, and each common path once
+					expect( bare.hits( "/gone.xml" ).len() ).toBe( 1 )
+					expect( bare.hits( "/feed.json" ).len() ).toBe( 3 )
+				} finally {
+					bare.stop()
+				}
+			} )
+
+			it( "finds a feed at a common path when the one a page advertises is gone", () => {
+				expect( finder.find( site.at( "/broken-advert" ) ) ).toBe( [ { url: site.at( "/atom.xml" ), title: "Atom Example", link: "https://atom.example/blog/", type: "atom_1.0", source: "path" } ] )
+			} )
+
+			it( "stops when its time is up", () => {
+				var before = site.hits().len()
+				expect( finder.find( site.at( "/broken-advert" ), { budgetSeconds: 0 } ) ).toBeEmpty()
+				expect( site.hits().len() - before ).toBe( 1 )
+			} )
+
+			it( "assumes https for an address without a scheme, and refuses private addresses by default", () => {
+				expect( () => findFeeds( "127.0.0.1/blog" ) ).toThrow( type = "Feeds.FetchError.PrivateAddress" )
+				expect( () => findFeeds( site.at( "/blog" ) ) ).toThrow( type = "Feeds.FetchError.PrivateAddress" )
+				expect( findFeeds( site.at( "/blog" ), { allowPrivateAddresses: true } ).len() ).toBe( 2 )
+			} )
+
+			it( "throws Feeds.FetchError when the page can't be reached at all", () => {
+				var closed = new tests.helpers.FeedServer()
+				var address = closed.at( "/" )
+				closed.stop()
+				expect( () => finder.find( address ) ).toThrow( type = "Feeds.FetchError" )
+			} )
+
+			it( "knows feed addresses for Reddit, GitHub and Mastodon-style pages", () => {
+				expect( finder.knownPatterns( "https://www.reddit.com/r/boxlang/" ) ).toBe( [ "https://www.reddit.com/r/boxlang/.rss" ] )
+				expect( finder.knownPatterns( "https://old.reddit.com/user/someone" ) ).toBe( [ "https://www.reddit.com/user/someone/.rss" ] )
+				expect( finder.knownPatterns( "https://github.com/ortus-boxlang/BoxLang" ) ).toBe( [ "https://github.com/ortus-boxlang/BoxLang/releases.atom" ] )
+				expect( finder.knownPatterns( "https://github.com/robertz" ) ).toBe( [ "https://github.com/robertz.atom" ] )
+				expect( finder.knownPatterns( "https://mastodon.example/@ada" ) ).toBe( [ "https://mastodon.example/@ada.rss" ] )
+				expect( finder.knownPatterns( "https://mastodon.example/tags/boxlang" ) ).toBe( [ "https://mastodon.example/tags/boxlang.rss" ] )
+				expect( finder.knownPatterns( "https://example.com/blog/post" ) ).toBeEmpty()
+				expect( finder.knownPatterns( "not a url" ) ).toBeEmpty()
+			} )
+
+		} )
+
+	}
+
+}

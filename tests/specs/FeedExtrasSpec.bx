@@ -93,7 +93,8 @@ class extends="testbox.system.BaseSpec" {
 					expect( feed.nextUrl ).toBe( "" )
 					expect( feed.hubs ).toBeEmpty()
 					expect( feed.poll ).toBe( { minutes: 0, skipHours: [], skipDays: [] } )
-					expect( feed.podcast ).toBe( { persons: [], funding: [] } )
+					expect( feed.podcast.persons ).toBeEmpty()
+					expect( feed.podcast.funding ).toBeEmpty()
 				} )
 
 			} )
@@ -149,7 +150,8 @@ class extends="testbox.system.BaseSpec" {
 					expect( extras.persons.map( ( person ) => person.name & ":" & person.role ) ).toBe( [ "Grace Guest:guest", "Charles Cohost:host" ] )
 					expect( extras.persons[ 1 ].url ).toBe( "https://grace.example/" )
 					expect( extras.soundbites ).toBe( [ { startTime: 73.5, duration: 60, title: "The best minute" } ] )
-					expect( show.items[ 2 ].podcast ).toBe( { transcripts: [], chaptersUrl: "", persons: [], soundbites: [] } )
+					expect( show.items[ 2 ].podcast.transcripts ).toBeEmpty()
+					expect( show.items[ 2 ].podcast.chaptersUrl ).toBe( "" )
 				} )
 
 				it( "adds alternate enclosures to the enclosures", () => {
@@ -193,6 +195,88 @@ class extends="testbox.system.BaseSpec" {
 					expect( keys( json ) ).toBe( keys( rss ) )
 					expect( keys( atom ) ).toBe( keys( rss ) )
 					expect( keys( json.items[ 1 ].podcast ) ).toBe( keys( show.items[ 1 ].podcast ) )
+					expect( keys( json.podcast ) ).toBe( keys( show.podcast ) )
+					expect( keys( atom.podcast ) ).toBe( keys( show.podcast ) )
+				} )
+
+			} )
+
+			describe( "the rest of a podcast", () => {
+
+				beforeEach( () => {
+					variables.full = variables.parser.parse( fixture( "podcast-full.xml" ) )
+				} )
+
+				it( "reads a show's iTunes details", () => {
+					var details = full.podcast
+					expect( details.author ).toBe( "Full Media & Friends" )
+					expect( details.owner ).toBe( { name: "Olive Owner", email: "olive@full.example" } )
+					expect( details.type ).toBe( "serial" )
+					expect( details.explicit ).toBeTrue()
+					expect( details.complete ).toBeTrue()
+					expect( details.newFeedUrl ).toBe( "https://new.full.example/feed.xml" )
+					expect( details.categories ).toBe( [ "Technology", "Technology > Tech News", "Society & Culture" ] )
+				} )
+
+				it( "reads a show's Podcasting 2.0 guid, lock, medium and location", () => {
+					expect( full.podcast.guid ).toBe( "917393e3-1b1e-5cef-ace4-edaa54e1f810" )
+					expect( full.podcast.locked ).toBeTrue()
+					expect( full.podcast.medium ).toBe( "music" )
+					expect( full.podcast.location ).toBe( { name: "Austin, TX", geo: "geo:30.2672,97.7431", osm: "R113314" } )
+				} )
+
+				it( "reads who gets paid, skipping a recipient with no address", () => {
+					var value = full.podcast.value
+					expect( value.type ).toBe( "lightning" )
+					expect( value.method ).toBe( "keysend" )
+					expect( value.suggested ).toBe( 0.00000005 )
+					expect( value.recipients.len() ).toBe( 2 )
+					expect( value.recipients[ 2 ] ).toBe( { name: "App", type: "node", address: "03def", split: 10, fee: true, customKey: "696969", customValue: "xyz" } )
+					expect( value.recipients[ 1 ].fee ).toBeFalse()
+				} )
+
+				it( "reads a live item, with its times in UTC", () => {
+					var live = full.podcast.liveItems[ 1 ]
+					expect( live.status ).toBe( "live" )
+					expect( iso( live.start ) ).toBe( "2026-11-02T23:00:00Z" )
+					expect( isNull( live.end ) ).toBeTrue()
+					expect( live.id ).toBe( "live-1" )
+					expect( live.title ).toBe( "Live: Q&A" )
+					expect( live.link ).toBe( "https://full.example/live" )
+					expect( live.enclosures ).toBe( [ { url: "https://full.example/live.mp3", type: "audio/mpeg", length: 312 } ] )
+					expect( live.contentLinks[ 1 ] ).toBe( { url: "https://stream.example/full", label: "Watch the stream" } )
+					expect( full.items.len() ).toBe( 3 )
+				} )
+
+				it( "takes the season and episode from Podcasting 2.0 over iTunes", () => {
+					var both = full.items[ 1 ].podcast
+					expect( both.season ).toBe( 2 )
+					expect( both.episode ).toBe( 5 )
+					expect( both.episodeType ).toBe( "bonus" )
+					expect( both.explicit ).toBeFalse()
+					expect( both.location.name ).toBe( "London" )
+					expect( both.value.recipients[ 1 ].name ).toBe( "Guest" )
+					var itunes = full.items[ 2 ].podcast
+					expect( itunes.season ).toBe( 3 )
+					expect( itunes.episode ).toBe( 12 )
+					expect( itunes.episodeType ).toBe( "trailer" )
+					expect( itunes.explicit ).toBeTrue()
+				} )
+
+				it( "leaves what an episode doesn't say empty", () => {
+					var bare = full.items[ 3 ].podcast
+					expect( bare.season ).toBe( 0 )
+					expect( bare.episode ).toBe( 0 )
+					expect( bare.episodeType ).toBe( "" )
+					expect( bare.explicit ).toBeFalse()
+					expect( bare.location ).toBe( { name: "", geo: "", osm: "" } )
+					expect( bare.value ).toBe( { type: "", method: "", suggested: 0, recipients: [] } )
+				} )
+
+				it( "takes non-http URLs out of a live item too, with httpOnly", () => {
+					var live = parser.parse( fixture( "podcast-full.xml" ), { httpOnly: true } ).podcast.liveItems[ 1 ]
+					expect( live.contentLinks ).toBe( [ { url: "https://stream.example/full", label: "Watch the stream" } ] )
+					expect( parser.parse( fixture( "podcast-full.xml" ) ).podcast.liveItems[ 1 ].contentLinks.len() ).toBe( 2 )
 				} )
 
 			} )

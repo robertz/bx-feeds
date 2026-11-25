@@ -33,6 +33,7 @@ class {
 	/**
 	 * options: { etag, lastModified: from the last fetch's result, sent as If-None-Match and
 	 *            If-Modified-Since; parse: false to get a 200's bytes in body instead of a feed;
+	 *            accept: an Accept header for something other than a feed;
 	 *            userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses: for this call;
 	 *            httpOnly, collapseRevisions, maxItems: passed on to the parser }
 	 * timeoutSeconds covers the whole fetch, redirects and body included; maxBytes
@@ -86,6 +87,47 @@ class {
 		throw( type = "Feeds.FetchError.TooManyRedirects", message = "More than #config.maxRedirects# redirects" )
 	}
 
+	/**
+	 * A form POST, as WebSub's request to a hub is, with the same checks on the
+	 * address as a fetch, the same timeout and User-Agent. Redirects aren't followed.
+	 * @return { status, body: the first 2 KB of the answer as text }
+	 */
+	struct function postForm( required string targetUrl, required struct fields, struct options = {} ) {
+		var config = duplicate( variables.settings ).append( arguments.options )
+		var deadline = getTickCount() + config.timeoutSeconds * 1000
+		var pairs = []
+		for ( var name in arguments.fields ) {
+			pairs.append( urlEncodedFormat( name ) & "=" & urlEncodedFormat( arguments.fields[ name ] ) )
+		}
+		var payload = pairs.toList( "&" ).getBytes( "UTF-8" )
+		var connection = open( trim( arguments.targetUrl ), config, deadline )
+		try {
+			connection.setRequestMethod( "POST" )
+			connection.setDoOutput( true )
+			connection.setRequestProperty( "Content-Type", "application/x-www-form-urlencoded" )
+			connection.setRequestProperty( "Accept", "*/*" )
+			var status = overNetwork( () => {
+				var out = connection.getOutputStream()
+				out.write( payload )
+				out.close()
+				return connection.getResponseCode()
+			} )
+			var said = ""
+			try {
+				var stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream()
+				if ( !isNull( stream ) ) {
+					said = createObject( "java", "java.lang.String" ).init( stream.readNBytes( 2048 ), "UTF-8" )
+					stream.close()
+				}
+			} catch ( any e ) {
+				// the status is what matters
+			}
+			return { status: status, body: said }
+		} finally {
+			connection.disconnect()
+		}
+	}
+
 	private function open( required string target, required struct config, required numeric deadline ) {
 		if ( !reFindNoCase( "^https?://[^/\s]", arguments.target ) ) {
 			throw( type = "Feeds.FetchError", message = "Only http and https URLs can be fetched" )
@@ -100,7 +142,7 @@ class {
 		connection.setConnectTimeout( remaining )
 		connection.setReadTimeout( remaining )
 		connection.setRequestProperty( "User-Agent", arguments.config.userAgent )
-		connection.setRequestProperty( "Accept", static.ACCEPT )
+		connection.setRequestProperty( "Accept", len( arguments.config.accept ?: "" ) ? arguments.config.accept : static.ACCEPT )
 		connection.setRequestProperty( "Accept-Encoding", "gzip" )
 		if ( len( arguments.config.etag ?: "" ) ) {
 			connection.setRequestProperty( "If-None-Match", arguments.config.etag )

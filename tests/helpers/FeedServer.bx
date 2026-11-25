@@ -25,7 +25,8 @@ class {
 				for ( var name in exchange.getRequestHeaders().keySet() ) {
 					headers[ name ] = exchange.getRequestHeaders().getFirst( name )
 				}
-				seen.add( { path: path, headers: headers } )
+				var sent = createObject( "java", "java.lang.String" ).init( exchange.getRequestBody().readAllBytes(), "UTF-8" )
+				seen.add( { path: path, headers: headers, method: exchange.getRequestMethod(), body: sent } )
 				var answer = routes.keyExists( path ) ? routes[ path ]( headers ) : { status: 404 }
 				if ( ( answer.delayMs ?: 0 ) > 0 ) {
 					sleep( answer.delayMs )
@@ -70,7 +71,7 @@ class {
 		return "http://127.0.0.1:#variables.httpServer.getAddress().getPort()##arguments.path#"
 	}
 
-	/** The requests received for a path, oldest first: [ { path, headers } ]. Every request when no path is given. */
+	/** The requests received for a path, oldest first: [ { path, headers, method, body } ]. Every request when no path is given. */
 	array function hits( string path = "" ) {
 		var wanted = arguments.path
 		var all = []

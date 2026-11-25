@@ -1,0 +1,168 @@
+/** The WebSub subscriber helpers, with a local server standing in for the hub. */
+class extends="testbox.system.BaseSpec" {
+
+	function fields( required string body ) {
+		var sent = {}
+		for ( var pair in listToArray( arguments.body, "&" ) ) {
+			sent[ urlDecode( listFirst( pair, "=" ) ) ] = urlDecode( listRest( pair, "=" ) )
+		}
+		return sent
+	}
+
+	function beforeAll() {
+		variables.hub = new tests.helpers.FeedServer()
+		variables.hub.on( "/hub", ( headers ) => { return { status: 202 } } )
+		variables.hub.on( "/refusing-hub", ( headers ) => { return { status: 400, body: "Topic not   allowed#char( 10 )#here" } } )
+		variables.hub.on( "/redirecting-hub", ( headers ) => { return { status: 302, headers: { "Location": "/hub" } } } )
+		variables.websub = new bxModules.bxFeeds.models.WebSub( { allowPrivateAddresses: true, userAgent: "Spec/1.0" } )
+		variables.topic = "https://blog.example/feed.xml?a=1&b=2"
+		variables.callback = "https://reader.example/websub/abc123"
+	}
+
+	function afterAll() {
+		variables.hub.stop()
+	}
+
+	function run() {
+
+		describe( "WebSub", () => {
+
+			describe( "subscribing", () => {
+
+				it( "posts a subscribe request to the hub as a form", () => {
+					var answer = websub.subscribe( hub.at( "/hub" ), topic, callback, { secret: "s3cret", leaseSeconds: 3600 } )
+					expect( answer.accepted ).toBeTrue()
+					expect( answer.status ).toBe( 202 )
+					var sent = hub.hits( "/hub" ).last()
+					expect( sent.method ).toBe( "POST" )
+					expect( sent.headers[ "Content-Type" ] ).toBe( "application/x-www-form-urlencoded" )
+					expect( sent.headers[ "User-Agent" ] ).toBe( "Spec/1.0" )
+					var form = fields( sent.body )
+					expect( form[ "hub.mode" ] ).toBe( "subscribe" )
+					expect( form[ "hub.topic" ] ).toBe( topic )
+					expect( form[ "hub.callback" ] ).toBe( callback )
+					expect( form[ "hub.secret" ] ).toBe( "s3cret" )
+					expect( form[ "hub.lease_seconds" ] ).toBe( "3600" )
+					expect( form[ "hub.verify" ] ).toBe( "async" )
+				} )
+
+				it( "asks for ten days and sends no secret unless given one", () => {
+					websub.subscribe( hub.at( "/hub" ), topic, callback )
+					var form = fields( hub.hits( "/hub" ).last().body )
+					expect( form[ "hub.lease_seconds" ] ).toBe( "864000" )
+					expect( form.keyExists( "hub.secret" ) ).toBeFalse()
+				} )
+
+				it( "posts an unsubscribe request", () => {
+					expect( websub.unsubscribe( hub.at( "/hub" ), topic, callback ).accepted ).toBeTrue()
+					var form = fields( hub.hits( "/hub" ).last().body )
+					expect( form[ "hub.mode" ] ).toBe( "unsubscribe" )
+					expect( form[ "hub.topic" ] ).toBe( topic )
+					expect( form.keyExists( "hub.lease_seconds" ) ).toBeFalse()
+				} )
+
+				it( "says when the hub refuses, with what it said", () => {
+					var answer = websub.subscribe( hub.at( "/refusing-hub" ), topic, callback )
+					expect( answer.accepted ).toBeFalse()
+					expect( answer.status ).toBe( 400 )
+					expect( answer.body ).toInclude( "Topic not" )
+				} )
+
+				it( "doesn't follow a hub's redirect", () => {
+					var before = hub.hits( "/hub" ).len()
+					var answer = websub.subscribe( hub.at( "/redirecting-hub" ), topic, callback )
+					expect( answer.accepted ).toBeFalse()
+					expect( answer.status ).toBe( 302 )
+					expect( hub.hits( "/hub" ).len() ).toBe( before )
+				} )
+
+				it( "refuses a hub on a private address by default, and anything but http(s)", () => {
+					var before = hub.hits().len()
+					expect( () => webSub().subscribe( hub.at( "/hub" ), topic, callback ) ).toThrow( type = "Feeds.FetchError.PrivateAddress" )
+					expect( () => websub.subscribe( "file:///etc/hosts", topic, callback ) ).toThrow( type = "Feeds.FetchError" )
+					expect( hub.hits().len() ).toBe( before )
+				} )
+
+				it( "throws Feeds.FetchError when the hub can't be reached", () => {
+					var closed = new tests.helpers.FeedServer()
+					var address = closed.at( "/hub" )
+					closed.stop()
+					expect( () => websub.subscribe( address, topic, callback ) ).toThrow( type = "Feeds.FetchError" )
+				} )
+
+			} )
+
+			describe( "the hub's check", () => {
+
+				it( "accepts a subscribe for the topic it asked about", () => {
+					var check = websub.challenge( { "hub.mode": "subscribe", "hub.topic": topic, "hub.challenge": "echo-me", "hub.lease_seconds": "86400" }, topic )
+					expect( check ).toBe( { mode: "subscribe", accepted: true, challenge: "echo-me", leaseSeconds: 86400, reason: "" } )
+				} )
+
+				it( "accepts an unsubscribe the same way, for the caller to agree to or not", () => {
+					var check = websub.challenge( { "hub.mode": "unsubscribe", "hub.topic": topic, "hub.challenge": "bye" }, topic )
+					expect( check.mode ).toBe( "unsubscribe" )
+					expect( check.accepted ).toBeTrue()
+					expect( check.leaseSeconds ).toBe( 0 )
+				} )
+
+				it( "doesn't accept another topic, a missing challenge or an unknown mode", () => {
+					expect( websub.challenge( { "hub.mode": "subscribe", "hub.topic": "https://evil.example/feed", "hub.challenge": "x" }, topic ).accepted ).toBeFalse()
+					expect( websub.challenge( { "hub.mode": "subscribe", "hub.topic": ucase( topic ), "hub.challenge": "x" }, topic ).accepted ).toBeFalse()
+					expect( websub.challenge( { "hub.mode": "subscribe", "hub.topic": topic }, topic ).accepted ).toBeFalse()
+					var odd = websub.challenge( { "hub.mode": "publish", "hub.topic": topic, "hub.challenge": "x" }, topic )
+					expect( odd.accepted ).toBeFalse()
+					expect( odd.mode ).toBe( "" )
+					expect( websub.challenge( {}, topic ).accepted ).toBeFalse()
+				} )
+
+				it( "reports a refusal and its reason", () => {
+					var check = websub.challenge( { "hub.mode": "denied", "hub.topic": topic, "hub.reason": "Not allowed" }, topic )
+					expect( check.mode ).toBe( "denied" )
+					expect( check.accepted ).toBeFalse()
+					expect( check.reason ).toBe( "Not allowed" )
+				} )
+
+			} )
+
+			describe( "a push's signature", () => {
+
+				it( "accepts a body signed with the secret, in any of the four algorithms", () => {
+					var body = '<rss version="2.0"><channel><title>Pushed #char( 8212 )# caf#char( 233 )#</title></channel></rss>'
+					for ( var name in [ "sha1", "sha256", "sha384", "sha512" ] ) {
+						var signature = name & "=" & lcase( hmac( body, "s3cret", "Hmac" & ucase( name ), "UTF-8" ) )
+						expect( websub.isSigned( body, signature, "s3cret" ) ).toBeTrue( name )
+						expect( websub.isSigned( body.getBytes( "UTF-8" ), signature, "s3cret" ) ).toBeTrue( name & " bytes" )
+						expect( websub.isSigned( body, ucase( name ) & "=" & ucase( listRest( signature, "=" ) ), "s3cret" ) ).toBeTrue( name & " upper case" )
+					}
+				} )
+
+				it( "matches a known HMAC-SHA256", () => {
+					// RFC 4231 test case 2
+					expect( websub.isSigned( "what do ya want for nothing?", "sha256=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "Jefe" ) ).toBeTrue()
+				} )
+
+				it( "refuses another secret, a changed body, and a signature it can't read", () => {
+					var body = "<rss/>"
+					var signature = "sha256=" & lcase( hmac( body, "s3cret", "HmacSHA256", "UTF-8" ) )
+					expect( websub.isSigned( body, signature, "other" ) ).toBeFalse()
+					expect( websub.isSigned( body & " ", signature, "s3cret" ) ).toBeFalse()
+					expect( websub.isSigned( body, "", "s3cret" ) ).toBeFalse()
+					expect( websub.isSigned( body, listRest( signature, "=" ), "s3cret" ) ).toBeFalse()
+					expect( websub.isSigned( body, "md5=" & listRest( signature, "=" ), "s3cret" ) ).toBeFalse()
+					expect( websub.isSigned( body, signature, "" ) ).toBeFalse()
+				} )
+
+				it( "makes secrets that are long, hex and different each time", () => {
+					var first = websub.newSecret()
+					expect( reFind( "^[0-9a-f]{64}$", first ) ).toBe( 1 )
+					expect( websub.newSecret() ).notToBe( first )
+				} )
+
+			} )
+
+		} )
+
+	}
+
+}
