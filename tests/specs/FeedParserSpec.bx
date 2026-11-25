@@ -72,7 +72,8 @@ class extends="testbox.system.BaseSpec" {
 					expect( first.link ).toBe( "https://rdf.example/story/1?from=rss" )
 					expect( iso( first.published ) ).toBe( "2026-11-03T10:00:00Z" )
 					expect( first.authors ).toBe( [ "Sam" ] )
-					expect( first.contentHtml ).toBe( "Plain words with <b>markup</b> anyway." )
+					expect( first.contentHtml ).toBe( "<p>Plain words with <b>markup</b> anyway.</p>" )
+					expect( first.summary ).toBe( "Plain words with <b>markup</b> anyway." )
 					expect( iso( feed.items[ 2 ].published ) ).toBe( "2026-11-02T00:00:00Z" )
 				} )
 
@@ -98,7 +99,7 @@ class extends="testbox.system.BaseSpec" {
 
 				it( "turns Atom's text content into HTML", () => {
 					var plain = parser.parse( fixture( "atom10.xml" ) ).items[ 2 ]
-					expect( plain.contentHtml ).toBe( "1 &lt; 2 &amp; that's plain<br>second line" )
+					expect( plain.contentHtml ).toBe( "<p>1 &lt; 2 &amp; that's plain<br>second line</p>" )
 					expect( isNull( plain.published ) ).toBeTrue()
 					expect( iso( plain.updated ) ).toBe( "2026-10-30T12:00:00Z" )
 				} )
@@ -146,7 +147,7 @@ class extends="testbox.system.BaseSpec" {
 					var second = parser.parse( fixture( "feed.json" ) ).items[ 2 ]
 					expect( second.id ).toBe( "1" )
 					expect( second.link ).toBe( "https://elsewhere.example/thing" )
-					expect( second.contentHtml ).toBe( "Plain &amp; simple<br>second line" )
+					expect( second.contentHtml ).toBe( "<p>Plain &amp; simple<br>second line</p>" )
 					expect( isNull( second.published ) ).toBeTrue()
 					expect( second.authors ).toBe( [ "Site Author" ] )
 				} )
@@ -181,12 +182,24 @@ class extends="testbox.system.BaseSpec" {
 					expect( parser.parse( fixture( "rss10.rdf" ) ).items[ 1 ].id ).toBe( "https://rdf.example/story/1" )
 				} )
 
-				it( "falls back to the item's link when there's no guid", () => {
+				it( "falls back to an RSS item's link as the feed wrote it when there's no guid", () => {
 					var items = parser.parse( fixture( "messy.xml" ), { baseUrl: "https://messy.example/feed" } ).items
-					expect( items[ 1 ].id ).toBe( "https://messy.example/posts/one" )
-					expect( items[ 3 ].id ).toBe( "https://messy.example/posts/untitled" )
+					expect( items[ 1 ].id ).toBe( "/posts/one" )
+					expect( items[ 1 ].link ).toBe( "https://messy.example/posts/one" )
+					expect( items[ 3 ].id ).toBe( "/posts/untitled" )
 					// a blank <guid> is no guid
-					expect( items[ 5 ].id ).toBe( "https://messy.example/posts/three" )
+					expect( items[ 5 ].id ).toBe( "/posts/three" )
+					// so the id is the same wherever the feed is fetched from
+					expect( parser.parse( fixture( "messy.xml" ), { baseUrl: "https://mirror.example/" } ).items[ 1 ].id ).toBe( "/posts/one" )
+					expect( parser.parse( fixture( "messy.xml" ) ).items[ 1 ].id ).toBe( "/posts/one" )
+					expect( parser.parse( fixture( "rss091.xml" ) ).items[ 1 ].id ).toBe( "http://old.example/1999/first.html" )
+				} )
+
+				it( "does the same for an Atom entry without an id, and resolves the link for JSON Feed", () => {
+					var atom = '<feed xmlns="http://www.w3.org/2005/Atom"><title>No ids</title><entry><title>One</title><link href="posts/1"/></entry></feed>'
+					var entry = parser.parse( atom, { baseUrl: "https://atom.example/blog/feed.xml" } ).items[ 1 ]
+					expect( entry.id ).toBe( "posts/1" )
+					expect( entry.link ).toBe( "https://atom.example/blog/posts/1" )
 					expect( parser.parse( fixture( "feed.json" ) ).items[ 3 ].id ).toBe( "https://json.example/posts/0" )
 				} )
 
@@ -266,6 +279,28 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			describe( "content", () => {
+
+				it( "escapes an RSS description that is plain text, a paragraph for each run of lines", () => {
+					var text = parser.parse( fixture( "rss10-text.rdf" ) ).items[ 2 ]
+					expect( text.contentHtml ).toBe( "<p>Plain text, where 3 &lt; 4 and &lt;angle brackets&gt; are just words.<br>Same paragraph, next line.</p><p>A second paragraph.</p>" )
+					expect( text.summary ).toInclude( "3 < 4 and <angle brackets> are" )
+				} )
+
+				it( "reads a plain-text RSS description that holds tags as HTML, keeping its paragraphs", () => {
+					var html = parser.parse( fixture( "rss10-text.rdf" ) ).items[ 1 ].contentHtml
+					expect( html ).toBe( '<p>A tool lets you clear space from your drive.</p><p>It then <a href="https://text.example/more">does more</a>.</p><p><em>Third</em> paragraph.</p>' )
+				} )
+
+				it( "leaves an RSS 2.0 description as the HTML it is", () => {
+					var feed = parser.parse( '<rss version="2.0"><channel><title>T</title><item><guid>1</guid><description>No tags here, 3 &amp;lt; 4.' & char( 10 ) & char( 10 ) & 'Next.</description></item></channel></rss>' )
+					expect( feed.items[ 1 ].contentHtml ).toBe( "No tags here, 3 &lt; 4.#char( 10 )##char( 10 )#Next." )
+				} )
+
+				it( "makes paragraphs of Atom and JSON text too", () => {
+					var atom = parser.parse( '<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><entry><id>a</id><title>x</title><content type="text">One' & char( 13 ) & char( 10 ) & char( 13 ) & char( 10 ) & 'Two &lt;b&gt;</content></entry></feed>' )
+					expect( atom.items[ 1 ].contentHtml ).toBe( "<p>One</p><p>Two &lt;b&gt;</p>" )
+					expect( parser.parse( '{"version":"https://jsonfeed.org/version/1.1","title":"T","items":[{"id":"a","content_text":""},{"id":"b","content_text":"  only  "}]}' ).items.map( ( item ) => item.contentHtml ) ).toBe( [ "", "<p>only</p>" ] )
+				} )
 
 				it( "returns CDATA and escaped HTML alike, unsanitized", () => {
 					var items = parser.parse( fixture( "messy.xml" ) ).items

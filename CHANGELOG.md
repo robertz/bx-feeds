@@ -1,5 +1,18 @@
 # Changelog
 
+**0.5.1**
+- **Breaking:** an RSS or Atom item without a guid gets its link as the feed
+  wrote it as its id, not the resolved link. That is what ROME falls back to,
+  so ids match those an app built on ROME has already stored. Only items with
+  a relative link are affected.
+- An RSS 0.9x or 1.0 description that is plain text is escaped; it used to be
+  returned as HTML, so `3 < 4` could lose text. One that holds tags is still
+  HTML, and gets paragraphs where it has blank lines.
+- Plain text (Atom, JSON Feed, Media RSS and the above) becomes a `<p>` for
+  each run of lines, not lines joined with `<br>`.
+- `dropEmptyItems` option: items with no title, link, content or enclosure are
+  left out, and a feed of nothing else throws `Feeds.ParseError`.
+
 **0.5.0**
 - `fallbackUserAgents`: a site that refuses the User-Agent with a 401 or 403
   is asked again as each fallback, and the one a host accepts is remembered.

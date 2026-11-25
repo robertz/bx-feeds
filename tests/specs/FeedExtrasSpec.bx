@@ -172,7 +172,7 @@ class extends="testbox.system.BaseSpec" {
 					var video = parser.parse( fixture( "youtube.xml" ) ).items[ 1 ]
 					expect( video.id ).toBe( "yt:video:abc123" )
 					expect( video.image ).toBe( "https://img.example/vi/abc123/hqdefault.jpg" )
-					expect( video.contentHtml ).toBe( "We built a thing &amp; filmed it.<br><br>Links: https://example.com/thing" )
+					expect( video.contentHtml ).toBe( "<p>We built a thing &amp; filmed it.</p><p>Links: https://example.com/thing</p>" )
 					expect( video.summary ).toBe( "" )
 					expect( video.authors ).toBe( [ "Example Channel" ] )
 				} )
@@ -366,6 +366,34 @@ class extends="testbox.system.BaseSpec" {
 						"https://news.example/c##top"
 					] )
 					expect( parser.parse( fixture( "hostile-urls.xml" ) ).items[ 2 ].id ).toBe( "https://news.example/story##2" )
+				} )
+
+				it( "leaves out items with nothing to show, with dropEmptyItems", () => {
+					var xml = '<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>Mixed</title><link>https://example.com/</link>
+						<item><g:id>1</g:id><g:title>Only in g:</g:title></item>
+						<item><title> </title><description></description></item>
+						<item><title>Real</title><link>https://example.com/real</link></item>
+						<item><enclosure url="https://cdn.example.com/e1.mp3" type="audio/mpeg" length="1"/></item>
+						<item><description>Just words</description></item>
+						</channel></rss>'
+					expect( parser.parse( xml ).items.len() ).toBe( 5 )
+					var kept = parser.parse( xml, { dropEmptyItems: true } ).items
+					expect( kept.len() ).toBe( 3 )
+					expect( kept[ 1 ].title ).toBe( "Real" )
+					expect( kept[ 2 ].enclosures[ 1 ].url ).toBe( "https://cdn.example.com/e1.mp3" )
+					expect( kept[ 3 ].contentHtml ).toBe( "Just words" )
+					// the count is of what's left
+					expect( parser.parse( xml, { dropEmptyItems: true, maxItems: 2 } ).items[ 2 ].enclosures.len() ).toBe( 1 )
+				} )
+
+				it( "refuses a feed whose items are all empty, but not one with no items, with dropEmptyItems", () => {
+					var products = '<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>Shop</title><item><g:id>1</g:id></item><item><g:id>2</g:id></item></channel></rss>'
+					expect( () => parser.parse( products, { dropEmptyItems: true } ) ).toThrow( type = "Feeds.ParseError", regex = "no title, link or text" )
+					expect( parser.parse( products ).items.len() ).toBe( 2 )
+					var quiet = parser.parse( '<rss version="2.0"><channel><title>Quiet</title><link>https://example.com/</link></channel></rss>', { dropEmptyItems: true } )
+					expect( quiet.title ).toBe( "Quiet" )
+					expect( quiet.items ).toBeEmpty()
+					expect( parser.parse( fixture( "feed.json" ), { dropEmptyItems: true } ).items.len() ).toBe( 3 )
 				} )
 
 				it( "keeps only the first maxItems items", () => {

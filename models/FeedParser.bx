@@ -30,6 +30,7 @@ class {
 		// sized by its lead byte, the continuation bytes landing in the C1 controls real text never holds
 		C1_CONTROL = REGEX.compile( "[\u0080-\u009F]" )
 		DOUBLE_ENCODED = REGEX.compile( "[\u00C2-\u00DF][\u0080-\u00BF]|[\u00E0-\u00EF][\u0080-\u00BF]{2}|[\u00F0-\u00F4][\u0080-\u00BF]{3}" )
+		HTML_TAG = REGEX.compile( "(?i)</?(p|br|a|div|img|em|strong|b|i|ul|ol|li|blockquote|span|iframe)\b[^>]*>" )
 		EMAIL_NAME = REGEX.compile( "^\S+@\S+\s*\((.+)\)$" )
 		ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 		MEDIA = "http://search.yahoo.com/mrss/"
@@ -69,6 +70,7 @@ class {
 	 *            contentType: its HTTP Content-Type header, for the charset of bytes,
 	 *            httpOnly: true to blank or drop every returned URL that isn't http(s),
 	 *            collapseRevisions: true to take the "##3" off an id that is the item's link plus an edit number,
+	 *            dropEmptyItems: true to leave out items with no title, link, content or enclosure, and refuse a feed of nothing else,
 	 *            maxItems: keep only the first so many items,
 	 *            maxLength: refuse a document of more characters than this }
 	 */
@@ -80,6 +82,13 @@ class {
 			unreadable( "The feed is longer than #limit# characters" )
 		}
 		var feed = left( text, 1 ) == "{" ? fromJson( text, baseUrl ) : fromXml( text, baseUrl )
+		if ( ( arguments.options.dropEmptyItems ?: false ) && feed.items.len() ) {
+			// a product feed puts everything in its own namespace, so every item reads as the same blank one
+			feed.items = feed.items.filter( ( item ) => len( item.title ) || len( item.link ) || len( trim( item.contentHtml ) ) || item.enclosures.len() )
+			if ( !feed.items.len() ) {
+				unreadable( "Its items have no title, link or text to show" )
+			}
+		}
 		var most = val( arguments.options.maxItems ?: 0 )
 		if ( most > 0 && feed.items.len() > most ) {
 			feed.items = feed.items.slice( 1, most )
@@ -406,8 +415,7 @@ class {
 			}
 		}
 		if ( !len( content ) && len( trim( summary ) ) ) {
-			// RSS descriptions hold HTML whatever the version says; only Atom's type="text" means it
-			content = isAtom && isText( description.getType() ?: "" ) ? textToHtml( summary ) : summary
+			content = described( summary, description.getType() ?: "", isAtom )
 		}
 		var media = mediaOf( arguments.entry, contentBase )
 		if ( !len( content ) ) {
@@ -448,7 +456,9 @@ class {
 			image = trim( episode.getImageUri() ?: "" )
 		}
 		return {
-			id          : idOf( nativeId( arguments.entry, arguments.type ), link, title, isoOf( utc( arguments.entry.getPublishedDate() ) ), content ),
+			// ROME's own fallback for an item without a guid is its link as written (an Atom entry without an id gets
+			// that from nativeId), and ids already stored by ROME's users were made that way
+			id          : idOf( nativeId( arguments.entry, arguments.type ), isAtom ? link : trim( arguments.entry.getLink() ?: "" ), title, isoOf( utc( arguments.entry.getPublishedDate() ) ), content ),
 			title       : title,
 			link        : link,
 			published   : utc( arguments.entry.getPublishedDate() ),
@@ -488,8 +498,8 @@ class {
 
 	/**
 	 * An item's stable id: the feed's own id when it gives one, as it is; otherwise
-	 * the item's link; with neither, "sha256:" and the hash of its title, published
-	 * time and content.
+	 * the item's link (as the feed wrote it for RSS and Atom, resolved for JSON
+	 * Feed); with neither, "sha256:" and the hash of its title, published time and content.
 	 */
 	private string function idOf( required string native, required string link, required string title, required string published, required string content ) {
 		if ( len( trim( arguments.native ) ) ) {
@@ -1173,8 +1183,28 @@ class {
 		return listFindNoCase( "text,text/plain", trim( arguments.type ) ) > 0
 	}
 
+	/**
+	 * A summary or description as HTML. Atom says when it means text. RSS 0.9x and
+	 * 1.0 descriptions are plain text by their specs (ROME says text/plain), but
+	 * publishers put HTML in them like any RSS 2.0 feed, often with paragraphs
+	 * split by blank lines: one holding tags is HTML, one without is text.
+	 */
+	private string function described( required string value, required string type, required boolean isAtom ) {
+		if ( !isText( arguments.type ) ) {
+			return arguments.value
+		}
+		if ( !arguments.isAtom && static.HTML_TAG.matcher( arguments.value ).find() ) {
+			return "<p>" & reReplace( trim( arguments.value ), "\n[ \t]*\n", "</p><p>", "all" ) & "</p>"
+		}
+		return textToHtml( arguments.value )
+	}
+
+	/** Plain text as HTML: escaped, a paragraph for each run of lines, a <br> between the lines of one. */
 	private string function textToHtml( required string text ) {
-		return reReplace( encodeForHTML( trim( arguments.text ) ), "\r?\n", "<br>", "all" )
+		var paragraphs = reReplace( reReplace( trim( arguments.text ), "\r\n?", char( 10 ), "all" ), "\n[ \t]*\n\s*", char( 30 ), "all" )
+		return listToArray( paragraphs, char( 30 ) )
+			.map( ( paragraph ) => "<p>" & listToArray( paragraph, char( 10 ) ).map( ( line ) => encodeForHTML( trim( line ) ) ).toList( "<br>" ) & "</p>" )
+			.toList( "" )
 	}
 
 	private void function addOnce( required array list, required string value ) {

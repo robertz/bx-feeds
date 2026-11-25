@@ -5,7 +5,7 @@
  */
 class {
 
-	this.version     = "0.5.0";
+	this.version     = "0.5.1";
 	this.mapping     = "bxFeeds";
 	this.author      = "Robert Zehnder";
 	this.description = "Fetches and parses RSS, Atom and JSON Feed into one normalized struct, with ROME.";

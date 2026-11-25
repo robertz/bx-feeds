@@ -64,7 +64,7 @@ class {
 	 *            If-Modified-Since; parse: false to get a 200's bytes in body instead of a feed;
 	 *            accept: an Accept header for something other than a feed;
 	 *            any of the module's settings, for this call;
-	 *            httpOnly, collapseRevisions, maxItems: passed on to the parser }
+	 *            httpOnly, collapseRevisions, dropEmptyItems, maxItems: passed on to the parser }
 	 * timeoutSeconds covers the whole fetch: every User-Agent tried, redirects
 	 * and body included; maxBytes counts the body after gzip is undone.
 	 */
@@ -163,7 +163,7 @@ class {
 					body         : javacast( "null", "" )
 				}
 				if ( status == 200 && ( config.parse ?: true ) ) {
-					// the parser's own options (httpOnly, collapseRevisions, maxItems) pass through
+					// the parser's own options (httpOnly, collapseRevisions, dropEmptyItems, maxItems) pass through
 					result.feed = variables.parser.parse( bodyOf( connection, config.maxBytes, deadline ), duplicate( arguments.options ).append( { baseUrl: current, contentType: result.contentType } ) )
 				} else if ( status == 200 ) {
 					result.body = bodyOf( connection, config.maxBytes, deadline )

@@ -81,6 +81,7 @@ feed = parseFeed( bytes, { baseUrl: "https://example.com/blog/feed.xml", content
 | `contentType` | The HTTP `Content-Type` header the bytes came with, used to work out their charset. |
 | `httpOnly` | `true` to take out every returned URL that isn't http(s): a single one becomes `""`, one in a list (`hubs`, `enclosures`, transcripts, funding) is dropped with its entry. URLs inside `contentHtml` and `summary` are left for your sanitizer, and ids aren't touched. |
 | `collapseRevisions` | `true` to take the `#3` off an id that is the item's own link plus an edit number, as some news feeds write their guids. Without it every edit is a new item. |
+| `dropEmptyItems` | `true` to leave out items with no title, no link, no content and no enclosure, which are all one blank item to a reader. A feed with items that are *all* empty (a product feed, say) then throws `Feeds.ParseError`. |
 | `maxItems` | Keep only the first so many items. `0`, the default, keeps them all. |
 | `maxLength` | Refuse a document of more characters than this with `Feeds.ParseError`. `0`, the default, is no limit. |
 
@@ -130,7 +131,7 @@ Every key is always there, whatever the format. Text that's missing is `""`, a l
 
 **An item**
 
-- `contentHtml` is the best body the item has: the full content (`content:encoded`, Atom `<content>`, JSON `content_html`) when there is one, otherwise the description, otherwise a Media RSS description (the only text a YouTube video has). Plain text (Atom `type="text"`, JSON `content_text`, Media RSS) is escaped into HTML. `summary` is the feed's own summary or description as it was written, so for an RSS item with only a `<description>` the two are the same.
+- `contentHtml` is the best body the item has: the full content (`content:encoded`, Atom `<content>`, JSON `content_html`) when there is one, otherwise the description, otherwise a Media RSS description (the only text a YouTube video has). Plain text (Atom `type="text"`, JSON `content_text`, Media RSS) is escaped into HTML, a `<p>` for each run of lines. RSS 0.9x and 1.0 descriptions are plain text by their specs but usually hold HTML: one with tags in it is taken as HTML (and gets paragraphs where it has blank lines), one without is escaped like any text. `summary` is the feed's own summary or description as it was written, so for an RSS item with only a `<description>` the two are the same.
 - `published` and `updated` are what the feed said, with no filling in. Many Atom feeds only have `updated`, so a reader wants `item.published ?: item.updated`.
 - `title` is plain text: entities are decoded (once more than XML does, since many feeds escape twice), and tags are stripped only from a title the feed declares as HTML, so `<input> considered harmful` keeps its brackets.
 - `authors` and `categories` are trimmed, entity-decoded names with repeats dropped. RSS's `ada@example.com (Ada Lovelace)` becomes `Ada Lovelace`.
@@ -186,10 +187,10 @@ A person's `role` is `"host"` when the feed doesn't give one. `season` and `epis
 A reader dedupes on `item.id`, so the rule is fixed:
 
 1. **The feed's own id, trimmed and otherwise untouched**: RSS `<guid>`, Atom `<id>`, RSS 1.0 `rdf:about`, JSON Feed `id`. A blank one counts as missing.
-2. Otherwise **the item's link**, resolved against `baseUrl`.
+2. Otherwise **the item's link as the feed wrote it**, before it's resolved. (For JSON Feed, the resolved link.)
 3. With no link either, `"sha256:"` followed by the SHA-256 (lowercase hex) of the title, a newline, the published time as `2026-11-02T15:00:00Z` (or nothing), a newline, and the content.
 
-Rule 2 means two things. Pass the same `baseUrl` every time you parse a feed (`fetchFeed()` does: the address that answered), or the ids of items with relative links will change. And two items without guids that share a link are one item to a reader. An id from rule 3 changes when the publisher edits the item.
+Rule 2 is what ROME itself falls back to, so ids match what an app built on ROME has already stored, and they don't change with `baseUrl` or when a feed moves to another host. It also means two items without guids that share a link are one item to a reader. An id from rule 3 changes when the publisher edits the item.
 
 Ids are unique within one feed at best, so store them per feed. Some feeds number each edit in the guid (`https://example.com/story#3`); pass `collapseRevisions: true` to keep those one item. Choose once: turning it on later changes the ids of such items.
 
@@ -218,7 +219,7 @@ if ( result.notModified ) {
 | `parse` | `false` to get a 200's bytes in `body` instead of a parsed `feed`: for a page you'll run `discoverFeeds()` on, or anything else you want fetched with the same limits. |
 | Any module setting | Overrides it for this call: `userAgent`, `timeoutSeconds`, `maxBytes`, `maxRedirects`, `fallbackUserAgents`, `pauseAfter429`, `retryNotFound`, `allowPrivateAddresses`. |
 | `accept` | An `Accept` header, for fetching something that isn't a feed. |
-| `httpOnly`, `collapseRevisions`, `maxItems` | Passed on to the parser. See [Parsing](#parsing). |
+| `httpOnly`, `collapseRevisions`, `dropEmptyItems`, `maxItems` | Passed on to the parser. See [Parsing](#parsing). |
 
 | Result | Meaning |
 |---|---|
