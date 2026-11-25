@@ -3,7 +3,7 @@
  * unchanged feed costs one small request:
  *
  *   result = new bxModules.bxFeeds.models.FeedFetcher().fetch( feedUrl, { etag: saved.etag, lastModified: saved.lastModified } )
- *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, contentType, retryAfterSeconds, links, feed, body }
+ *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, contentType, retryAfterSeconds, maxAgeSeconds, links, feed, body }
  *
  * feed is the FeedParser struct on a 200 and null otherwise (304, 404, 500...).
  * Redirects are followed by hand so permanent ones can be reported, and every
@@ -33,7 +33,8 @@ class {
 	/**
 	 * options: { etag, lastModified: from the last fetch's result, sent as If-None-Match and
 	 *            If-Modified-Since; parse: false to get a 200's bytes in body instead of a feed;
-	 *            userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses: for this call }
+	 *            userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses: for this call;
+	 *            httpOnly, collapseRevisions, maxItems: passed on to the parser }
 	 * timeoutSeconds covers the whole fetch, redirects and body included; maxBytes
 	 * counts the body after gzip is undone.
 	 */
@@ -66,12 +67,14 @@ class {
 					permanentUrl : permanentUrl,
 					contentType  : connection.getContentType() ?: "",
 					retryAfterSeconds : retryAfter( connection.getHeaderField( "Retry-After" ) ?: "" ),
+					maxAgeSeconds : maxAge( connection.getHeaderField( "Cache-Control" ) ?: "", connection.getHeaderField( "Expires" ) ?: "" ),
 					links        : linksOf( connection, current ),
 					feed         : javacast( "null", "" ),
 					body         : javacast( "null", "" )
 				}
 				if ( status == 200 && ( config.parse ?: true ) ) {
-					result.feed = variables.parser.parse( bodyOf( connection, config.maxBytes, deadline ), { baseUrl: current, contentType: result.contentType } )
+					// the parser's own options (httpOnly, collapseRevisions, maxItems) pass through
+					result.feed = variables.parser.parse( bodyOf( connection, config.maxBytes, deadline ), duplicate( arguments.options ).append( { baseUrl: current, contentType: result.contentType } ) )
 				} else if ( status == 200 ) {
 					result.body = bodyOf( connection, config.maxBytes, deadline )
 				}
@@ -254,6 +257,23 @@ class {
 			}
 		}
 		return 0
+	}
+
+	/**
+	 * How long the server says its answer stays fresh, in seconds: Cache-Control's
+	 * max-age, else the time left until Expires. 0 when it says neither, or says
+	 * no-cache or no-store.
+	 */
+	private numeric function maxAge( required string cacheControl, required string expires ) {
+		var control = lcase( arguments.cacheControl )
+		if ( reFind( "\bno-(cache|store)\b", control ) ) {
+			return 0
+		}
+		var age = reMatch( "\bmax-age\s*=\s*""?[0-9]{1,9}", control )
+		if ( age.len() ) {
+			return int( reReplace( age[ 1 ], "[^0-9]", "", "all" ) )
+		}
+		return retryAfter( reFind( "^[0-9]+$", trim( arguments.expires ) ) ? "" : arguments.expires )
 	}
 
 	/** The response's Link headers (RFC 8288), where a feed can name its WebSub hub and itself: [ { url, rel } ], one per rel. */

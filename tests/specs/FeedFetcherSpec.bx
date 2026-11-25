@@ -49,6 +49,14 @@ class extends="testbox.system.BaseSpec" {
 		feeds.on( "/gone", ( headers ) => { return { status: 410, body: "Gone" } } )
 		feeds.on( "/error", ( headers ) => { return { status: 500, body: "<html>Oops</html>" } } )
 		feeds.on( "/html", ( headers ) => { return { status: 200, headers: { "Content-Type": "text/html" }, body: "<!doctype html><html><body>Sign in</body></html>" } } )
+		feeds.on( "/fresh", ( headers ) => { return { status: 200, headers: { "Cache-Control": "public, max-age=900, s-maxage=60" }, body: rss } } )
+		feeds.on( "/fresh-until", ( headers ) => {
+			var later = createObject( "java", "java.time.ZonedDateTime" ).now( createObject( "java", "java.time.ZoneOffset" ).UTC ).plusMinutes( 30 )
+			return { status: 200, headers: { "Expires": createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME.format( later ) }, body: rss }
+		} )
+		feeds.on( "/stale", ( headers ) => { return { status: 200, headers: { "Cache-Control": "no-cache, max-age=900", "Expires": "0" }, body: rss } } )
+		feeds.on( "/expired", ( headers ) => { return { status: 200, headers: { "Expires": "Thu, 01 Jan 2015 00:00:00 GMT" }, body: rss } } )
+		feeds.on( "/hostile", ( headers ) => { return { status: 200, body: fixture( "hostile-urls.xml" ) } } )
 		feeds.on( "/busy", ( headers ) => { return { status: 429, headers: { "Retry-After": "120" } } } )
 		feeds.on( "/busy-until", ( headers ) => {
 			var later = createObject( "java", "java.time.ZonedDateTime" ).now( createObject( "java", "java.time.ZoneOffset" ).UTC ).plusMinutes( 10 )
@@ -268,6 +276,25 @@ class extends="testbox.system.BaseSpec" {
 					expect( until ).toBeLTE( 600 )
 					expect( fetcher.fetch( feeds.at( "/busy-nonsense" ) ).retryAfterSeconds ).toBe( 0 )
 					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).retryAfterSeconds ).toBe( 0 )
+				} )
+
+				it( "reports how long the answer stays fresh: max-age, else Expires", () => {
+					expect( fetcher.fetch( feeds.at( "/fresh" ) ).maxAgeSeconds ).toBe( 900 )
+					var until = fetcher.fetch( feeds.at( "/fresh-until" ) ).maxAgeSeconds
+					expect( until ).toBeGT( 1790 )
+					expect( until ).toBeLTE( 1800 )
+					expect( fetcher.fetch( feeds.at( "/stale" ) ).maxAgeSeconds ).toBe( 0 )
+					expect( fetcher.fetch( feeds.at( "/expired" ) ).maxAgeSeconds ).toBe( 0 )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).maxAgeSeconds ).toBe( 0 )
+				} )
+
+				it( "passes the parser's options on", () => {
+					var feed = fetcher.fetch( feeds.at( "/hostile" ), { httpOnly: true, collapseRevisions: true, maxItems: 2 } ).feed
+					expect( feed.link ).toBe( "" )
+					expect( feed.items.len() ).toBe( 2 )
+					expect( feed.items[ 2 ].id ).toBe( "https://news.example/story" )
+					// where it was fetched from still wins over a baseUrl in the options
+					expect( fetcher.fetch( feeds.at( "/blog/messy.xml" ), { baseUrl: "https://elsewhere.example/" } ).feed.items[ 1 ].link ).toBe( feeds.at( "/posts/one" ) )
 				} )
 
 				it( "reports the Link header's hub and self, resolved", () => {

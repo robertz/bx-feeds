@@ -75,6 +75,10 @@ feed = parseFeed( bytes, { baseUrl: "https://example.com/blog/feed.xml", content
 |---|---|
 | `baseUrl` | Where the feed came from. Relative URLs are resolved against it. Without it they are returned as written. |
 | `contentType` | The HTTP `Content-Type` header the bytes came with, used to work out their charset. |
+| `httpOnly` | `true` to take out every returned URL that isn't http(s): a single one becomes `""`, one in a list (`hubs`, `enclosures`, transcripts, funding) is dropped with its entry. URLs inside `contentHtml` and `summary` are left for your sanitizer, and ids aren't touched. |
+| `collapseRevisions` | `true` to take the `#3` off an id that is the item's own link plus an edit number, as some news feeds write their guids. Without it every edit is a new item. |
+| `maxItems` | Keep only the first so many items. `0`, the default, keeps them all. |
+| `maxLength` | Refuse a document of more characters than this with `Feeds.ParseError`. `0`, the default, is no limit. |
 
 It returns:
 
@@ -152,7 +156,7 @@ A reader dedupes on `item.id`, so the rule is fixed:
 
 Rule 2 means two things. Pass the same `baseUrl` every time you parse a feed (`fetchFeed()` does: the address that answered), or the ids of items with relative links will change. And two items without guids that share a link are one item to a reader. An id from rule 3 changes when the publisher edits the item.
 
-Ids are unique within one feed at best, so store them per feed. Some feeds number each edit in the guid (`https://example.com/story#3`); if you want those to stay one item, strip the number before you store the id.
+Ids are unique within one feed at best, so store them per feed. Some feeds number each edit in the guid (`https://example.com/story#3`); pass `collapseRevisions: true` to keep those one item. Choose once: turning it on later changes the ids of such items.
 
 ### Fetching
 
@@ -178,6 +182,7 @@ if ( result.notModified ) {
 | `etag`, `lastModified` | The values a previous fetch returned. They are sent as `If-None-Match` and `If-Modified-Since`. |
 | `parse` | `false` to get a 200's bytes in `body` instead of a parsed `feed`: for a page you'll run `discoverFeeds()` on, or anything else you want fetched with the same limits. |
 | `userAgent`, `timeoutSeconds`, `maxBytes`, `maxRedirects`, `allowPrivateAddresses` | Override the module settings for this call. |
+| `httpOnly`, `collapseRevisions`, `maxItems` | Passed on to the parser. See [Parsing](#parsing). |
 
 | Result | Meaning |
 |---|---|
@@ -188,6 +193,7 @@ if ( result.notModified ) {
 | `permanentUrl` | Where the feed has permanently moved, or `""`. It's the end of the leading run of 301 and 308 redirects; a redirect after a temporary one (302, 303, 307) isn't counted, since the temporary hop may point elsewhere tomorrow. |
 | `contentType` | The response's `Content-Type` header, or `""`. |
 | `retryAfterSeconds` | How long the server asked to be left alone (`Retry-After`, sent as seconds or as a date), or 0. Worth honoring on a 429 or 503. |
+| `maxAgeSeconds` | How long the server says its answer stays fresh: `Cache-Control: max-age`, else the time left until `Expires`, or 0 (also for `no-cache` and `no-store`). A reason not to poll sooner. |
 | `links` | The response's `Link` headers as `[ { url, rel } ]`, one entry per rel. Some feeds name their WebSub `hub` and `self` here rather than in the document. |
 | `feed` | The `parseFeed()` struct on a 200. Null for any other status, and with `parse: false`. |
 | `body` | The 200's bytes with `parse: false`. Null otherwise. |
@@ -263,19 +269,17 @@ boxlang examples/smoke.bxs
 
 **HTML is not sanitized.** `contentHtml` and `summary` are returned as the feed wrote them, with only relative URLs made absolute. They can contain `<script>`, event handlers, `javascript:` links and tracking pixels. Sanitize them before you show them (that's another module's job). `title`, authors and categories are plain text, which can contain `<` and `&`: escape them on output like any other text.
 
-**URLs are not vetted.** Every URL the module returns (`link`, `image`, enclosures, `podcast.persons[].url`, OPML's `feedUrl`...) is whatever the feed said, resolved. It may be `javascript:` or `file:`. Check the scheme before you link to one or fetch it.
+**URLs are as the feed wrote them, unless you ask.** Every URL the module returns (`link`, `image`, enclosures, `podcast.persons[].url`...) is whatever the feed said, resolved. It may be `javascript:` or `file:`. Pass `httpOnly: true` to `parseFeed()` or `fetchFeed()` to have every one that isn't http(s) taken out. OPML addresses are always as written: check them before you subscribe.
 
 **Private addresses.** `fetchFeed()` refuses an address that isn't on the public internet: loopback, private and link-local ranges (including cloud metadata at `169.254.169.254`), carrier-grade NAT, reserved ranges, and IPv6 forms that carry or tunnel to one of those. The check is made for the first address and for every redirect. It resolves the host and then connects, relying on the JVM's DNS cache (30 seconds by default) to connect to what it checked; if you've turned that cache off, a hostile DNS server could answer differently the second time, and an egress proxy is the stronger defense.
 
-**Limits.** `timeoutSeconds` bounds the whole fetch, so a server that trickles bytes can't hold a worker. `maxBytes` is counted after decompression, so a gzip bomb is cut off too. The parser itself has no size limit: if you parse bytes you fetched yourself, limit them yourself.
+**Limits.** `timeoutSeconds` bounds the whole fetch, so a server that trickles bytes can't hold a worker. `maxBytes` is counted after decompression, so a gzip bomb is cut off too. When you parse a document you got some other way, `maxLength` and `maxItems` do the same job for `parseFeed()`.
 
 ## Not yet
 
 - The rest of iTunes and Media RSS (explicit flags, seasons and episode numbers, keywords, ratings, credits) and of Podcasting 2.0 (value, location, live items).
 - Picking a transcript or an enclosure for you, and taking an item's image from its content: those are a reader's choices.
-- Collapsing guids that number each edit (`#3`).
 - Dates in other languages, and ambiguous ones like `02/11/2026`.
-- `Cache-Control` and `Expires` from the response.
 - Fallback User-Agents, remembering a site's 429s, and telling a bot check from a refusal.
 - Probing a site for feeds it doesn't advertise (`/feed`, `/rss.xml`).
 - Polling, scheduling, HTML sanitizing and full-text extraction belong in the app or another module, not here.

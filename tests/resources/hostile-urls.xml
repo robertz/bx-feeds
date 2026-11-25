@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:podcast="https://podcastindex.org/namespace/1.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+<channel>
+<title>Hostile</title>
+<link>javascript:alert(1)</link>
+<description>Every URL is a trap, or isn't</description>
+<atom:link rel="self" href="file:///etc/passwd"/>
+<atom:link rel="hub" href="ftp://hub.example/"/>
+<atom:link rel="hub" href="https://hub.example/"/>
+<atom:link rel="next" href="data:text/xml,x"/>
+<itunes:image href="javascript:void(0)"/>
+<podcast:person href="javascript:alert(2)" img="https://img.example/ada.jpg">Ada</podcast:person>
+<podcast:funding url="javascript:pay()">Bad</podcast:funding>
+<podcast:funding url="https://fund.example/">Good</podcast:funding>
+<item>
+<title>Trap</title>
+<link>javascript:alert(3)</link>
+<guid isPermaLink="false">trap</guid>
+<comments>vbscript:x</comments>
+<itunes:image href="HTTPS://img.example/ok.jpg"/>
+<enclosure url="file:///etc/hosts" type="audio/mpeg" length="1"/>
+<enclosure url="http://cdn.example/ok.mp3" type="audio/mpeg" length="2"/>
+<podcast:transcript url="javascript:t()" type="text/vtt"/>
+<podcast:transcript url="https://t.example/ok.vtt" type="text/vtt"/>
+<podcast:chapters url="mailto:x@example.com"/>
+<podcast:person href="https://grace.example/" img="data:image/png;base64,AA">Grace</podcast:person>
+<description><![CDATA[<a href="javascript:alert(4)">still here</a>]]></description>
+</item>
+<item><title>Edited twice</title><link>https://news.example/story</link><guid>https://news.example/story#2</guid></item>
+<item><title>Edited, link has a query</title><link>https://news.example/other?at=rss</link><guid>https://news.example/other#7</guid></item>
+<item><title>Own fragment</title><link>https://news.example/page#part</link><guid>https://news.example/page#3</guid></item>
+<item><title>Someone else's number</title><link>https://news.example/a</link><guid>https://news.example/b#3</guid></item>
+<item><title>Not a number</title><link>https://news.example/c</link><guid>https://news.example/c#top</guid></item>
+</channel>
+</rss>

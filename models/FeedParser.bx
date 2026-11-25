@@ -66,15 +66,74 @@ class {
 	/**
 	 * input: the feed as a string, as bytes, or the path of a file holding it.
 	 * options: { baseUrl: where the feed came from, for resolving relative URLs,
-	 *            contentType: its HTTP Content-Type header, for the charset of bytes }
+	 *            contentType: its HTTP Content-Type header, for the charset of bytes,
+	 *            httpOnly: true to blank or drop every returned URL that isn't http(s),
+	 *            collapseRevisions: true to take the "##3" off an id that is the item's link plus an edit number,
+	 *            maxItems: keep only the first so many items,
+	 *            maxLength: refuse a document of more characters than this }
 	 */
 	struct function parse( required input, struct options = {} ) {
 		var baseUrl = trim( arguments.options.baseUrl ?: "" )
 		var text = documentText( arguments.input, arguments.options.contentType ?: "" )
-		if ( left( text, 1 ) == "{" ) {
-			return fromJson( text, baseUrl )
+		var limit = val( arguments.options.maxLength ?: 0 )
+		if ( limit > 0 && len( text ) > limit ) {
+			unreadable( "The feed is longer than #limit# characters" )
 		}
-		return fromXml( text, baseUrl )
+		var feed = left( text, 1 ) == "{" ? fromJson( text, baseUrl ) : fromXml( text, baseUrl )
+		var most = val( arguments.options.maxItems ?: 0 )
+		if ( most > 0 && feed.items.len() > most ) {
+			feed.items = feed.items.slice( 1, most )
+		}
+		if ( arguments.options.collapseRevisions ?: false ) {
+			for ( var item in feed.items ) {
+				item.id = withoutRevision( item.id, item.link )
+			}
+		}
+		return ( arguments.options.httpOnly ?: false ) ? httpOnly( feed ) : feed
+	}
+
+	/**
+	 * The id without the "##3" a feed bumps each time it edits an item: otherwise
+	 * every edit is a new item, a copy of the last. Only when the id is the
+	 * item's own link plus that number, and the link has no fragment of its own.
+	 */
+	private string function withoutRevision( required string id, required string link ) {
+		if ( !reFind( "^https?://[^##?]+##[0-9]+$", arguments.id ) || find( "##", arguments.link ) ) {
+			return arguments.id
+		}
+		var address = listFirst( arguments.id, "##" )
+		return compare( listFirst( arguments.link, "?" ), address ) == 0 ? address : arguments.id
+	}
+
+	/**
+	 * The feed with every URL that isn't http(s) taken out: a single one becomes
+	 * "", one in a list is dropped with its entry. URLs inside contentHtml and
+	 * summary are left for a sanitizer, and ids aren't touched.
+	 */
+	private struct function httpOnly( required struct feed ) {
+		var feed = arguments.feed
+		var web = ( value ) => reFindNoCase( "^https?://", trim( value ) ) ? value : ""
+		var people = ( persons ) => persons.map( ( person ) => {
+			person.url = web( person.url )
+			person.image = web( person.image )
+			return person
+		} )
+		for ( var key in [ "link", "feedUrl", "image", "nextUrl" ] ) {
+			feed[ key ] = web( feed[ key ] )
+		}
+		feed.hubs = feed.hubs.filter( ( hub ) => len( web( hub ) ) > 0 )
+		feed.podcast.persons = people( feed.podcast.persons )
+		feed.podcast.funding = feed.podcast.funding.filter( ( fund ) => len( web( fund.url ) ) > 0 )
+		for ( var item in feed.items ) {
+			for ( var key in [ "link", "commentsUrl", "image" ] ) {
+				item[ key ] = web( item[ key ] )
+			}
+			item.enclosures = item.enclosures.filter( ( enclosure ) => len( web( enclosure.url ) ) > 0 )
+			item.podcast.transcripts = item.podcast.transcripts.filter( ( transcript ) => len( web( transcript.url ) ) > 0 )
+			item.podcast.chaptersUrl = web( item.podcast.chaptersUrl )
+			item.podcast.persons = people( item.podcast.persons )
+		}
+		return feed
 	}
 
 	/** The document as text: a string as it is, a file's or a response's bytes decoded. Throws Feeds.ParseError. */

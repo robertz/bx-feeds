@@ -1,5 +1,15 @@
 # Changelog
 
+**0.3.0**
+- `httpOnly` option: every returned URL that isn't http(s) is blanked, or
+  dropped with its entry when it's in a list.
+- `collapseRevisions` option: an id that is the item's link plus an edit
+  number (`.../story#3`) loses the number, so an edited item stays one item.
+- `maxItems` and `maxLength` options limit what `parseFeed()` returns and
+  accepts.
+- `fetchFeed()` passes those options to the parser, and reports
+  `maxAgeSeconds` from `Cache-Control: max-age` or `Expires`.
+
 **0.2.0**
 - **Breaking:** `fetchFeed()` refuses addresses that aren't public (loopback,
   private, link-local and the like), on every redirect too, with

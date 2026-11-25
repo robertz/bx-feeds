@@ -234,6 +234,70 @@ class extends="testbox.system.BaseSpec" {
 
 			} )
 
+			describe( "options", () => {
+
+				it( "returns every URL as the feed wrote it unless told otherwise", () => {
+					var feed = parser.parse( fixture( "hostile-urls.xml" ) )
+					expect( feed.link ).toBe( "javascript:alert(1)" )
+					expect( feed.hubs.len() ).toBe( 2 )
+					expect( feed.items[ 1 ].enclosures.len() ).toBe( 2 )
+				} )
+
+				it( "blanks or drops every URL that isn't http(s) with httpOnly", () => {
+					var feed = parser.parse( fixture( "hostile-urls.xml" ), { httpOnly: true } )
+					expect( feed.link ).toBe( "" )
+					expect( feed.feedUrl ).toBe( "" )
+					expect( feed.nextUrl ).toBe( "" )
+					expect( feed.image ).toBe( "" )
+					expect( feed.hubs ).toBe( [ "https://hub.example/" ] )
+					expect( feed.podcast.persons ).toBe( [ { name: "Ada", role: "host", url: "", image: "https://img.example/ada.jpg" } ] )
+					expect( feed.podcast.funding ).toBe( [ { url: "https://fund.example/", label: "Good" } ] )
+
+					var trap = feed.items[ 1 ]
+					expect( trap.link ).toBe( "" )
+					expect( trap.commentsUrl ).toBe( "" )
+					expect( trap.image ).toBe( "HTTPS://img.example/ok.jpg" )
+					expect( trap.enclosures ).toBe( [ { url: "http://cdn.example/ok.mp3", type: "audio/mpeg", length: 2 } ] )
+					expect( trap.podcast.transcripts ).toBe( [ { url: "https://t.example/ok.vtt", type: "text/vtt" } ] )
+					expect( trap.podcast.chaptersUrl ).toBe( "" )
+					expect( trap.podcast.persons ).toBe( [ { name: "Grace", role: "host", url: "https://grace.example/", image: "" } ] )
+					expect( jsonSerialize( feed ).reReplace( '<a href=\\"javascript:alert\(4\)\\">', "", "all" ) ).notToInclude( "javascript:" )
+				} )
+
+				it( "leaves ids and the HTML alone with httpOnly", () => {
+					var feed = parser.parse( fixture( "hostile-urls.xml" ), { httpOnly: true } )
+					expect( feed.items[ 1 ].id ).toBe( "trap" )
+					expect( feed.items[ 1 ].contentHtml ).toBe( '<a href="javascript:alert(4)">still here</a>' )
+					expect( feed.items[ 2 ].link ).toBe( "https://news.example/story" )
+				} )
+
+				it( "takes the edit number off an id that is the item's link plus one, with collapseRevisions", () => {
+					var ids = parser.parse( fixture( "hostile-urls.xml" ), { collapseRevisions: true } ).items.map( ( item ) => item.id )
+					expect( ids ).toBe( [
+						"trap",
+						"https://news.example/story",
+						"https://news.example/other",
+						"https://news.example/page##3",
+						"https://news.example/b##3",
+						"https://news.example/c##top"
+					] )
+					expect( parser.parse( fixture( "hostile-urls.xml" ) ).items[ 2 ].id ).toBe( "https://news.example/story##2" )
+				} )
+
+				it( "keeps only the first maxItems items", () => {
+					expect( parser.parse( fixture( "hostile-urls.xml" ), { maxItems: 2 } ).items.map( ( item ) => item.title ) ).toBe( [ "Trap", "Edited twice" ] )
+					expect( parser.parse( fixture( "hostile-urls.xml" ), { maxItems: 50 } ).items.len() ).toBe( 6 )
+					expect( parser.parse( fixture( "hostile-urls.xml" ), { maxItems: 0 } ).items.len() ).toBe( 6 )
+					expect( parser.parse( fixture( "feed.json" ), { maxItems: 1 } ).items.len() ).toBe( 1 )
+				} )
+
+				it( "refuses a document longer than maxLength", () => {
+					expect( () => parser.parse( fixture( "hostile-urls.xml" ), { maxLength: 500 } ) ).toThrow( type = "Feeds.ParseError", regex = "longer than 500" )
+					expect( parser.parse( fixture( "hostile-urls.xml" ), { maxLength: 500000 } ).items.len() ).toBe( 6 )
+				} )
+
+			} )
+
 			describe( "URLs in srcset and style", () => {
 
 				it( "resolves each candidate of a srcset", () => {
