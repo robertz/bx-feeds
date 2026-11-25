@@ -1,0 +1,58 @@
+/**
+ * The three BIFs end to end, with no network: a feed is parsed, a page's feeds
+ * are discovered, and a feed is fetched twice from a server this script starts
+ * on a free local port (the second time it hasn't changed).
+ *   boxlang examples/smoke.bxs        with bx-feeds in ./boxlang_modules or BoxLang HOME
+ */
+rss = '<?xml version="1.0"?>
+<rss version="2.0"><channel>
+	<title>Smoke Test</title><link>https://example.com/</link><description>A feed</description>
+	<item><title>With a guid</title><link>/posts/1</link><guid>post-1</guid><pubDate>Mon, 02 Nov 2026 10:00:00 -0500</pubDate>
+		<description><![CDATA[<p>Hello, <a href="/about">about</a>.</p>]]></description></item>
+	<item><title>Without one</title><link>/posts/2</link><pubDate>not a date</pubDate></item>
+</channel></rss>'
+
+// 1. Parse.
+feed = parseFeed( rss, { baseUrl: "https://example.com/feed.xml" } )
+println( "#feed.title# (#feed.type#), #feed.items.len()# items" )
+for ( item in feed.items ) {
+	println( "  #item.id#  #item.link#  #isNull( item.published ) ? 'no date' : item.published.toISOString()#" )
+}
+println( "  " & feed.items[ 1 ].contentHtml )
+
+// 2. Discover.
+page = '<html><head><link rel="alternate" type="application/rss+xml" title="Posts" href="/feed.xml"></head></html>'
+for ( found in discoverFeeds( page, "https://example.com/blog/" ) ) {
+	println( "Discovered #found.url# (#found.type#, #found.title#)" )
+}
+
+// 3. Fetch, then fetch again with what the first answer said.
+httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( createObject( "java", "java.net.InetSocketAddress" ).init( "127.0.0.1", 0 ), 0 )
+httpServer.createContext( "/", ( exchange ) => {
+	exchange.getResponseHeaders().set( "ETag", '"smoke-1"' )
+	if ( ( exchange.getRequestHeaders().getFirst( "If-None-Match" ) ?: "" ) == '"smoke-1"' ) {
+		exchange.sendResponseHeaders( 304, javacast( "long", -1 ) )
+	} else {
+		var body = rss.getBytes( "UTF-8" )
+		exchange.sendResponseHeaders( 200, javacast( "long", arrayLen( body ) ) )
+		exchange.getResponseBody().write( body )
+	}
+	exchange.close()
+} )
+httpServer.start()
+try {
+	feedUrl = "http://127.0.0.1:#httpServer.getAddress().getPort()#/feed.xml"
+	first = fetchFeed( feedUrl )
+	println( "Fetched: #first.status#, etag #first.etag#, #first.feed.items.len()# items, first link #first.feed.items[ 1 ].link#" )
+	second = fetchFeed( feedUrl, { etag: first.etag, lastModified: first.lastModified } )
+	println( "Again: #second.status#, not modified: #second.notModified#" )
+} finally {
+	httpServer.stop( 0 )
+}
+
+// 4. What can't be read is a typed error.
+try {
+	parseFeed( "<html><body>Not a feed</body></html>" )
+} catch ( "Feeds.ParseError" e ) {
+	println( "Refused: #e.message#" )
+}
