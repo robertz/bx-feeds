@@ -1,5 +1,18 @@
 # Changelog
 
+**0.5.0**
+- `fallbackUserAgents`: a site that refuses the User-Agent with a 401 or 403
+  is asked again as each fallback, and the one a host accepts is remembered.
+- `challenged` on the fetch result: the refusal is a bot check (Cloudflare,
+  or a CAPTCHA) that no fetch can pass.
+- A site that answers a feed fetch with 429 is left alone, for its
+  `Retry-After` or 15 minutes doubling up to four hours. Until then fetches of
+  its feeds return a 429 marked `paused` without a request. `pauseAfter429:
+  false` turns this off.
+- `retryNotFound`: addresses matching a pattern are asked again after a 404.
+- `FeedFetcher` gains `pausedSites()`, `pausedSeconds()`, `endPause()`,
+  `forget()` and `siteOf()`.
+
 **0.4.0**
 - `findFeeds()`: the feeds behind a pasted address. The address itself, the
   feeds its page advertises, a known site pattern (Reddit, GitHub, Mastodon)

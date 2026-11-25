@@ -67,18 +67,40 @@ class extends="testbox.system.BaseSpec" {
 			return { status: 200, headers: { "Link": '<https://hub.example/>; rel="hub", </feed.xml>; rel="self alternate"; type="application/rss+xml", <https://no-rel.example/>' }, body: rss }
 		} )
 		feeds.on( "/image.png", ( headers ) => { return { status: 200, headers: { "Content-Type": "image/png" }, body: fixture( "garbage.bin" ) } } )
+		feeds.on( "/browsers-only", ( headers ) => {
+			var browser = ( headers[ "User-Agent" ] ?: "" ).startsWith( "Mozilla/" )
+			return { status: browser ? 200 : 403, body: browser ? rss : "Forbidden" }
+		} )
+		feeds.on( "/members-only", ( headers ) => { return { status: 401, body: "Sign in" } } )
+		feeds.on( "/captcha", ( headers ) => { return { status: 403, headers: { "Content-Type": "text/html" }, body: "<html><head><title>Just a moment...</title></head><body><div class=""cf-chl-widget""></div></body></html>" } } )
+		feeds.on( "/captcha-header", ( headers ) => { return { status: 403, headers: { "cf-mitigated": "challenge" }, body: "no" } } )
+		feeds.on( "/captcha-503", ( headers ) => { return { status: 503, body: "<div class=""g-recaptcha""></div>" } } )
+		feeds.on( "/busy-captcha", ( headers ) => { return { status: 429, body: "<script src=""https://geo.captcha-delivery.com/c.js""></script>" } } )
+		feeds.on( "/busy-plain", ( headers ) => { return { status: 429 } } )
+		feeds.on( "/busy-forever", ( headers ) => { return { status: 429, headers: { "Retry-After": "999999" } } } )
+		variables.flakyHits = 0
+		feeds.on( "/flaky", ( headers ) => {
+			variables.flakyHits++
+			return variables.flakyHits % 3 == 0 ? { status: 200, body: rss } : { status: 404 }
+		} )
 		feeds.on( "/latin1", ( headers ) => {
 			return { status: 200, headers: { "Content-Type": "text/xml; charset=ISO-8859-1" }, body: "<rss version=""2.0""><channel><title>Caf#char( 233 )#</title></channel></rss>".getBytes( "ISO-8859-1" ) }
 		} )
 	}
 
 	function afterAll() {
+		variables.fetcher.forget()
 		variables.feeds.stop()
 	}
 
 	function run() {
 
 		describe( "FeedFetcher", () => {
+
+			// what one spec's 429 or accepted User-Agent taught the fetcher mustn't reach the next
+			beforeEach( () => {
+				fetcher.forget()
+			} )
 
 			describe( "a plain fetch", () => {
 
@@ -271,10 +293,12 @@ class extends="testbox.system.BaseSpec" {
 					var busy = fetcher.fetch( feeds.at( "/busy" ) )
 					expect( busy.status ).toBe( 429 )
 					expect( busy.retryAfterSeconds ).toBe( 120 )
+					fetcher.forget()
 					var until = fetcher.fetch( feeds.at( "/busy-until" ) ).retryAfterSeconds
 					expect( until ).toBeGT( 590 )
 					expect( until ).toBeLTE( 600 )
-					expect( fetcher.fetch( feeds.at( "/busy-nonsense" ) ).retryAfterSeconds ).toBe( 0 )
+					expect( fetcher.fetch( feeds.at( "/busy-nonsense" ), { pauseAfter429: false } ).retryAfterSeconds ).toBe( 0 )
+					fetcher.forget()
 					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).retryAfterSeconds ).toBe( 0 )
 				} )
 
@@ -329,6 +353,179 @@ class extends="testbox.system.BaseSpec" {
 					expect( fetcher.withoutDefaultPort( "http://example.com:443/" ) ).toBe( "http://example.com:443/" )
 					expect( fetcher.withoutDefaultPort( "https://example.com:8443/x" ) ).toBe( "https://example.com:8443/x" )
 					expect( fetcher.withoutDefaultPort( "https://example.com/x" ) ).toBe( "https://example.com/x" )
+				} )
+
+			} )
+
+			describe( "sites that refuse the User-Agent", () => {
+
+				it( "asks again as each fallback when refused, and remembers the one a host accepts", () => {
+					var picky = new bxModules.bxFeeds.models.FeedFetcher( { allowPrivateAddresses: true, userAgent: "Reader/1.0", fallbackUserAgents: [ "curl/8", "Mozilla/5.0 (Macintosh)" ] } )
+					var before = feeds.hits( "/browsers-only" ).len()
+					var result = picky.fetch( feeds.at( "/browsers-only" ) )
+					expect( result.status ).toBe( 200 )
+					expect( result.feed.title ).toBe( "Example Blog" )
+					var asked = feeds.hits( "/browsers-only" ).map( ( hit ) => hit.headers[ "User-Agent" ] )
+					expect( asked.slice( before + 1, 3 ) ).toBe( [ "Reader/1.0", "curl/8", "Mozilla/5.0 (Macintosh)" ] )
+					// the next fetch goes straight to the one that worked
+					picky.fetch( feeds.at( "/browsers-only" ) )
+					expect( feeds.hits( "/browsers-only" ).len() ).toBe( before + 4 )
+					expect( feeds.hits( "/browsers-only" ).last().headers[ "User-Agent" ] ).toBe( "Mozilla/5.0 (Macintosh)" )
+					// and so does any other fetcher's, until it's forgotten
+					fetcher.fetch( feeds.at( "/feed.xml" ) )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( "Mozilla/5.0 (Macintosh)" )
+					fetcher.forget( feeds.at( "/" ) )
+					fetcher.fetch( feeds.at( "/feed.xml" ) )
+					expect( feeds.hits( "/feed.xml" ).last().headers[ "User-Agent" ] ).toBe( getModuleInfo( "bxFeeds" ).settings.userAgent )
+				} )
+
+				it( "keeps the refusal when no fallback is accepted, or there are none", () => {
+					var before = feeds.hits( "/members-only" ).len()
+					var result = fetcher.fetch( feeds.at( "/members-only" ), { fallbackUserAgents: [ "Mozilla/5.0", "curl/8" ] } )
+					expect( result.status ).toBe( 401 )
+					expect( result.challenged ).toBeFalse()
+					expect( isNull( result.feed ) ).toBeTrue()
+					expect( feeds.hits( "/members-only" ).len() - before ).toBe( 3 )
+					expect( fetcher.fetch( feeds.at( "/browsers-only" ) ).status ).toBe( 403 )
+					expect( feeds.hits( "/browsers-only" ).last().headers[ "User-Agent" ] ).toBe( getModuleInfo( "bxFeeds" ).settings.userAgent )
+				} )
+
+				it( "tells a bot check from a plain refusal, and doesn't try the fallbacks on one", () => {
+					var before = feeds.hits( "/captcha" ).len()
+					var result = fetcher.fetch( feeds.at( "/captcha" ), { fallbackUserAgents: [ "Mozilla/5.0" ] } )
+					expect( result.status ).toBe( 403 )
+					expect( result.challenged ).toBeTrue()
+					expect( feeds.hits( "/captcha" ).len() - before ).toBe( 1 )
+					expect( fetcher.fetch( feeds.at( "/captcha-header" ) ).challenged ).toBeTrue()
+					expect( fetcher.fetch( feeds.at( "/captcha-503" ) ).challenged ).toBeTrue()
+					expect( fetcher.fetch( feeds.at( "/busy-captcha" ), { pauseAfter429: false } ).challenged ).toBeTrue()
+				} )
+
+				it( "doesn't call an ordinary answer a bot check", () => {
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).challenged ).toBeFalse()
+					expect( fetcher.fetch( feeds.at( "/members-only" ) ).challenged ).toBeFalse()
+					expect( fetcher.fetch( feeds.at( "/gone" ) ).challenged ).toBeFalse()
+					expect( fetcher.fetch( feeds.at( "/error" ) ).challenged ).toBeFalse()
+					expect( fetcher.fetch( feeds.at( "/busy" ), { pauseAfter429: false } ).challenged ).toBeFalse()
+				} )
+
+			} )
+
+			describe( "sites that answer 429", () => {
+
+				it( "leaves the site alone for as long as it asked, without a request", () => {
+					expect( fetcher.pausedSeconds( feeds.at( "/feed.xml" ) ) ).toBe( 0 )
+					var refused = fetcher.fetch( feeds.at( "/busy" ) )
+					expect( refused.status ).toBe( 429 )
+					expect( refused.paused ).toBeFalse()
+					expect( fetcher.pausedSeconds( feeds.at( "/feed.xml" ) ) ).toBeGT( 115 )
+					expect( fetcher.pausedSeconds( feeds.at( "/feed.xml" ) ) ).toBeLTE( 120 )
+
+					var before = feeds.hits().len()
+					var held = fetcher.fetch( feeds.at( "/feed.xml" ) )
+					expect( feeds.hits().len() ).toBe( before )
+					expect( held.status ).toBe( 429 )
+					expect( held.paused ).toBeTrue()
+					expect( held.retryAfterSeconds ).toBeGT( 115 )
+					expect( held.finalUrl ).toBe( feeds.at( "/feed.xml" ) )
+					expect( isNull( held.feed ) ).toBeTrue()
+					expect( held.keyArray().sort( "text" ) ).toBe( refused.keyArray().sort( "text" ) )
+					// every fetcher in the runtime knows, the BIF's included
+					expect( fetchFeed( feeds.at( "/feed.xml" ), { allowPrivateAddresses: true } ).paused ).toBeTrue()
+				} )
+
+				it( "lists the paused sites, and forgets them when told", () => {
+					fetcher.fetch( feeds.at( "/busy" ) )
+					var paused = fetcher.pausedSites()
+					expect( paused.len() ).toBe( 1 )
+					expect( paused[ 1 ].site ).toBe( "127.0.0.1" )
+					expect( paused[ 1 ].refusals ).toBe( 1 )
+					expect( paused[ 1 ].seconds ).toBeGT( 115 )
+					fetcher.forget( feeds.at( "/anything" ) )
+					expect( fetcher.pausedSites() ).toBeEmpty()
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).status ).toBe( 200 )
+				} )
+
+				it( "waits 15 minutes when the site doesn't say, doubling for each 429 in a row", () => {
+					fetcher.fetch( feeds.at( "/busy-plain" ) )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeGT( 890 )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeLTE( 900 )
+					for ( var expected in [ 1800, 3600, 7200, 14400, 14400 ] ) {
+						// the pause is over; the site is asked again and still says no
+						fetcher.endPause( feeds.at( "/" ) )
+						fetcher.fetch( feeds.at( "/busy-plain" ) )
+						expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeGT( expected - 10 )
+						expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeLTE( expected )
+					}
+				} )
+
+				it( "starts over once a fetch gets through", () => {
+					fetcher.fetch( feeds.at( "/busy-plain" ) )
+					fetcher.endPause( feeds.at( "/" ) )
+					fetcher.fetch( feeds.at( "/busy-plain" ) )
+					expect( fetcher.pausedSites()[ 1 ].refusals ).toBe( 2 )
+					fetcher.endPause( feeds.at( "/" ) )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ) ).status ).toBe( 200 )
+					fetcher.fetch( feeds.at( "/busy-plain" ) )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeLTE( 900 )
+					expect( fetcher.pausedSites()[ 1 ].refusals ).toBe( 1 )
+				} )
+
+				it( "never waits more than an hour on a site's say-so", () => {
+					fetcher.fetch( feeds.at( "/busy-forever" ) )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeLTE( 3600 )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBeGT( 3590 )
+				} )
+
+				it( "doesn't pause for a 429 on something that isn't a feed, or hold such a fetch back", () => {
+					expect( fetcher.fetch( feeds.at( "/busy" ), { parse: false } ).status ).toBe( 429 )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBe( 0 )
+					fetcher.fetch( feeds.at( "/busy" ) )
+					var page = fetcher.fetch( feeds.at( "/image.png" ), { parse: false } )
+					expect( page.status ).toBe( 200 )
+					expect( page.paused ).toBeFalse()
+				} )
+
+				it( "neither pauses nor holds back with pauseAfter429 off", () => {
+					fetcher.fetch( feeds.at( "/busy" ), { pauseAfter429: false } )
+					expect( fetcher.pausedSeconds( feeds.at( "/" ) ) ).toBe( 0 )
+					fetcher.fetch( feeds.at( "/busy" ) )
+					expect( fetcher.fetch( feeds.at( "/feed.xml" ), { pauseAfter429: false } ).status ).toBe( 200 )
+				} )
+
+				it( "knows which site an address belongs to", () => {
+					expect( fetcher.siteOf( "https://someone.tumblr.com/rss" ) ).toBe( "tumblr.com" )
+					expect( fetcher.siteOf( "https://tumblr.com/" ) ).toBe( "tumblr.com" )
+					expect( fetcher.siteOf( "https://feeds.NEWS.bbc.co.uk/rss.xml" ) ).toBe( "bbc.co.uk" )
+					expect( fetcher.siteOf( "https://www.abc.net.au/feed" ) ).toBe( "abc.net.au" )
+					expect( fetcher.siteOf( "https://blog.example.de/feed" ) ).toBe( "example.de" )
+					expect( fetcher.siteOf( "http://192.168.1.10:8080/feed" ) ).toBe( "192.168.1.10" )
+					expect( fetcher.siteOf( "http://[2001:db8::1]/feed" ) ).toBe( "[2001:db8::1]" )
+					expect( fetcher.siteOf( "http://localhost/feed" ) ).toBe( "localhost" )
+					expect( fetcher.siteOf( "not a url" ) ).toBe( "" )
+				} )
+
+			} )
+
+			describe( "hosts that answer 404 by mistake", () => {
+
+				it( "asks again after each delay, for addresses that match, until one isn't a 404", () => {
+					variables.flakyHits = 0
+					var result = fetcher.fetch( feeds.at( "/flaky" ), { retryNotFound: { pattern: "/flaky$", delaysMs: [ 10, 10, 10 ] } } )
+					expect( result.status ).toBe( 200 )
+					expect( variables.flakyHits ).toBe( 3 )
+				} )
+
+				it( "gives up when the delays run out, and doesn't retry other addresses", () => {
+					variables.flakyHits = 0
+					expect( fetcher.fetch( feeds.at( "/flaky" ), { retryNotFound: { pattern: "/flaky$", delaysMs: [ 10 ] } } ).status ).toBe( 404 )
+					expect( variables.flakyHits ).toBe( 2 )
+					var before = feeds.hits( "/nothing-here" ).len()
+					fetcher.fetch( feeds.at( "/nothing-here" ), { retryNotFound: { pattern: "/flaky$", delaysMs: [ 10, 10 ] } } )
+					expect( feeds.hits( "/nothing-here" ).len() - before ).toBe( 1 )
+					variables.flakyHits = 0
+					fetcher.fetch( feeds.at( "/flaky" ) )
+					expect( variables.flakyHits ).toBe( 1 )
 				} )
 
 			} )

@@ -7,6 +7,7 @@ RSS, Atom, JSON Feed and OPML for BoxLang, built for feed readers. `fetchFeed()`
 - Dates are BoxLang datetimes in UTC, or null. A date that can't be read is null, never an error.
 - Relative URLs in links, enclosures and HTML content come back absolute.
 - Fetching sends `If-None-Match` / `If-Modified-Since`, follows redirects and tells you which were permanent, stops at a timeout and a maximum size, and refuses private network addresses.
+- It copes with sites that make fetching hard: fallback User-Agents for ones that refuse yours, a flag for bot checks no fetch can pass, and a pause for a site that answers 429.
 - What a reader schedules and subscribes with: the feed's own address, WebSub hubs, the next page, `<ttl>` and skip hours, `Retry-After`.
 - Podcasts and video: durations, artwork, seasons and episodes, Media RSS thumbnails, and Podcasting 2.0 transcripts, chapters, people, funding, value and live items.
 - No DTD is ever read, so XXE and entity-expansion attacks don't work. See [Security](#security).
@@ -59,6 +60,9 @@ Or pass any of them in the options of one call: `fetchFeed( feedUrl, { timeoutSe
 | `timeoutSeconds` | `20` | The longest a whole fetch may take, redirects and body included. |
 | `maxBytes` | `10485760` (10 MB) | The largest response body accepted, counted after gzip is undone. |
 | `maxRedirects` | `5` | How many redirects to follow before giving up. |
+| `fallbackUserAgents` | `[]` | User-Agents to try, in order, when a site refuses `userAgent` with a 401 or 403. Some sites let only browsers through, so a browser's User-Agent string here gets their feeds. See [Sites that make fetching hard](#sites-that-make-fetching-hard). |
+| `pauseAfter429` | `true` | After a site answers a feed fetch with 429, leave it alone for a while: fetches of its feeds return a 429 marked `paused` without asking it. |
+| `retryNotFound` | `{ pattern: "", delaysMs: [] }` | For hosts that now and then answer 404 for a feed that exists: an address matching `pattern` (a regular expression) that gets a 404 is asked again after each of `delaysMs`. |
 | `allowPrivateAddresses` | `false` | Let `fetchFeed()` reach `localhost` and private, link-local and other non-public addresses. Leave it off wherever users choose what's fetched. Turn it on for feeds on your own network, and in tests against a local server. |
 
 ## Usage
@@ -212,7 +216,8 @@ if ( result.notModified ) {
 |---|---|
 | `etag`, `lastModified` | The values a previous fetch returned. They are sent as `If-None-Match` and `If-Modified-Since`. |
 | `parse` | `false` to get a 200's bytes in `body` instead of a parsed `feed`: for a page you'll run `discoverFeeds()` on, or anything else you want fetched with the same limits. |
-| `userAgent`, `timeoutSeconds`, `maxBytes`, `maxRedirects`, `allowPrivateAddresses` | Override the module settings for this call. |
+| Any module setting | Overrides it for this call: `userAgent`, `timeoutSeconds`, `maxBytes`, `maxRedirects`, `fallbackUserAgents`, `pauseAfter429`, `retryNotFound`, `allowPrivateAddresses`. |
+| `accept` | An `Accept` header, for fetching something that isn't a feed. |
 | `httpOnly`, `collapseRevisions`, `maxItems` | Passed on to the parser. See [Parsing](#parsing). |
 
 | Result | Meaning |
@@ -225,11 +230,34 @@ if ( result.notModified ) {
 | `contentType` | The response's `Content-Type` header, or `""`. |
 | `retryAfterSeconds` | How long the server asked to be left alone (`Retry-After`, sent as seconds or as a date), or 0. Worth honoring on a 429 or 503. |
 | `maxAgeSeconds` | How long the server says its answer stays fresh: `Cache-Control: max-age`, else the time left until `Expires`, or 0 (also for `no-cache` and `no-store`). A reason not to poll sooner. |
+| `challenged` | True when a refusal (401, 403, 429 or 503) is a bot check: Cloudflare's "Just a moment", or a CAPTCHA from DataDome, PerimeterX, reCAPTCHA or hCaptcha. No fetch can pass one, so retrying won't help. |
+| `paused` | True when no request was made because the site is being left alone after a 429. `status` is 429 and `retryAfterSeconds` is how much longer. |
 | `links` | The response's `Link` headers as `[ { url, rel } ]`, one entry per rel. Some feeds name their WebSub `hub` and `self` here rather than in the document. |
 | `feed` | The `parseFeed()` struct on a 200. Null for any other status, and with `parse: false`. |
 | `body` | The 200's bytes with `parse: false`. Null otherwise. |
 
 Only `http` and `https` are fetched, and redirects to anything else are refused. Gzip is asked for and undone. Every address on the way, the first and each redirect's, must be a public one unless `allowPrivateAddresses` is set.
+
+### Sites that make fetching hard
+
+**Sites that refuse your User-Agent.** With `fallbackUserAgents` set, a 401 or 403 is asked again as each fallback in turn. The first one a host accepts is remembered, and later fetches to that host use it straight away; when your own `userAgent` works again, it's forgotten. With no fallbacks, or none accepted, you get the refusal as it came.
+
+**Bot checks.** A refusal whose page is a bot check comes back with `challenged: true`. Fallbacks aren't tried on one, since it refuses every client alike. Tell the user the site wants a browser, rather than "feed not found".
+
+**Sites that answer 429.** When a feed fetch gets a 429, the whole site is left alone: for as long as its `Retry-After` says (an hour at most), or 15 minutes when it doesn't say, doubling for each 429 in a row up to four hours. Until then `fetchFeed()` for any feed on that site returns at once with `status: 429` and `paused: true`, making no request. A site here is the registrable domain, so every `*.tumblr.com` blog shares one pause, as they share one limit. The first 200 or 304 resets the doubling. A 429 for a fetch with `parse: false` (a page, an image) doesn't pause anything, and such fetches aren't held back. Turn all of it off with `pauseAfter429: false`.
+
+**Hosts that answer 404 by mistake.** `retryNotFound: { pattern: "^https://www\.youtube\.com/feeds/", delaysMs: [ 500, 2000 ] }` asks a matching address again after each delay while it keeps answering 404. Everything stays inside `timeoutSeconds`.
+
+What's remembered (accepted User-Agents, pauses) is held in memory and shared by every fetch in the BoxLang runtime; it's gone on restart, and isn't shared between servers. The model shows and clears it:
+
+```js
+fetcher = new bxModules.bxFeeds.models.FeedFetcher()
+fetcher.pausedSites()                      // [ { site: "tumblr.com", seconds: 840, refusals: 1 } ], soonest back first
+fetcher.pausedSeconds( feedUrl )           // 0 when the site may be asked now
+fetcher.endPause( feedUrl )                // ask again now, keeping count of its 429s
+fetcher.forget( feedUrl )                  // forget this site's pause, count and accepted User-Agent
+fetcher.forget()                           // forget everything
+```
 
 ### Finding a site's feeds
 
@@ -363,6 +391,8 @@ boxlang examples/smoke.bxs
 
 **WebSub.** Anyone who learns a callback address can POST to it. Treat a push as a feed from a stranger: accept it only when `isSigned()` says so, which needs a secret at subscribe time, and parse it with the same care as any other. Give each subscription its own secret and its own unguessable callback.
 
+**Fallback User-Agents** make your fetcher claim to be something it isn't. Sites that block feed readers sometimes mean to; use a fallback for getting feeds a site publishes for the public, not for getting around a block on purpose.
+
 **Limits.** `timeoutSeconds` bounds the whole fetch, so a server that trickles bytes can't hold a worker. `maxBytes` is counted after decompression, so a gzip bomb is cut off too. When you parse a document you got some other way, `maxLength` and `maxItems` do the same job for `parseFeed()`.
 
 ## Not yet
@@ -370,7 +400,7 @@ boxlang examples/smoke.bxs
 - The rest of Media RSS (ratings, credits, keywords) and of Podcasting 2.0 (value time splits, trailers, licenses, `podcast:txt`, remote items).
 - Picking a transcript or an enclosure for you, and taking an item's image from its content: those are a reader's choices.
 - Dates in other languages, and ambiguous ones like `02/11/2026`.
-- Fallback User-Agents, remembering a site's 429s, and telling a bot check from a refusal.
+- Sharing pauses and accepted User-Agents between servers, or keeping them across a restart.
 - More site patterns for `findFeeds()` (YouTube handles, Substack, Medium).
 - Publishing to a hub, and storing WebSub subscriptions: the module does the protocol, the state is yours.
 - Polling, scheduling, HTML sanitizing and full-text extraction belong in the app or another module, not here.

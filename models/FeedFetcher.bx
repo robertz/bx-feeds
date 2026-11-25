@@ -3,9 +3,19 @@
  * unchanged feed costs one small request:
  *
  *   result = new bxModules.bxFeeds.models.FeedFetcher().fetch( feedUrl, { etag: saved.etag, lastModified: saved.lastModified } )
- *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, contentType, retryAfterSeconds, maxAgeSeconds, links, feed, body }
+ *   // { status, notModified, etag, lastModified, finalUrl, permanentUrl, contentType, retryAfterSeconds, maxAgeSeconds,
+ *   //   links, challenged, paused, feed, body }
  *
  * feed is the FeedParser struct on a 200 and null otherwise (304, 404, 500...).
+ *
+ * Three things are done for sites that make fetching hard. One that refuses the
+ * User-Agent (401 or 403) is asked again as each of fallbackUserAgents, and the
+ * one it accepts is remembered for that host. A refusal that is a bot check (a
+ * CAPTCHA page no fetch can pass) is reported as challenged. And a site that
+ * answers a feed fetch with 429 is left alone for a while: until then fetches of
+ * its feeds return a 429 marked paused without asking it. What's remembered is
+ * kept in memory, for every fetcher in this BoxLang runtime.
+ *
  * Redirects are followed by hand so permanent ones can be reported, and every
  * hop must be a public address unless allowPrivateAddresses is set. A network
  * failure throws Feeds.FetchError, or its subtypes Feeds.FetchError.Timeout,
@@ -19,11 +29,30 @@ class {
 	static {
 		ACCEPT = "application/feed+json, application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 		REDIRECTS = [ 301, 302, 303, 307, 308 ]
+		REFUSED = [ 401, 403 ]
+		// a refusal that may be a bot check: the start of the page is read to tell
+		CHECKED = [ 401, 403, 429, 503 ]
+		CHECK_BYTES = 65536
+		// Cloudflare's interstitials, and the CAPTCHA widgets of it, DataDome, PerimeterX, reCAPTCHA and hCaptcha
+		CHALLENGE = "<title>\s*(just a moment|attention required!? \| cloudflare)|challenge-platform|cf-chl-|cf_chl_|captcha-delivery\.com|px-captcha|g-recaptcha|h-captcha|hcaptcha\.com"
+		// how long a site that answered 429 is left alone when it doesn't say, and at most when it does
+		PAUSE_SECONDS = 900
+		MAX_RETRY_AFTER = 3600
+		// when it doesn't say, each 429 in a row doubles PAUSE_SECONDS (15, 30, 60, 120 minutes), up to this
+		MAX_PAUSE_SECONDS = 14400
+		// second-level labels under a country code that are a registry's, not a site's (bbc.co.uk)
+		REGISTRY_LABELS = [ "ac", "co", "com", "edu", "gov", "net", "org" ]
+		// host -> the fallback User-Agent it accepted
+		HOST_AGENTS = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		// site (siteOf) -> epoch ms until which it's left alone
+		PAUSED = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		// site -> 429s in a row, until a fetch gets through
+		REFUSALS = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
 		LINK = createObject( "java", "java.util.regex.Pattern" ).compile( "<([^>]*)>([^,<]*)" )
 		LINK_REL = createObject( "java", "java.util.regex.Pattern" ).compile( "(?i);\s*rel\s*=\s*(?:""([^""]*)""|([^;\s]+))" )
 	}
 
-	/** overrides: any of the module's settings (userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses). */
+	/** overrides: any of the module's settings (see the README's Settings table). */
 	function init( struct overrides = {} ) {
 		variables.settings = duplicate( getModuleInfo( "bxFeeds" ).settings ).append( arguments.overrides )
 		variables.parser = new FeedParser()
@@ -34,15 +63,73 @@ class {
 	 * options: { etag, lastModified: from the last fetch's result, sent as If-None-Match and
 	 *            If-Modified-Since; parse: false to get a 200's bytes in body instead of a feed;
 	 *            accept: an Accept header for something other than a feed;
-	 *            userAgent, timeoutSeconds, maxBytes, maxRedirects, allowPrivateAddresses: for this call;
+	 *            any of the module's settings, for this call;
 	 *            httpOnly, collapseRevisions, maxItems: passed on to the parser }
-	 * timeoutSeconds covers the whole fetch, redirects and body included; maxBytes
-	 * counts the body after gzip is undone.
+	 * timeoutSeconds covers the whole fetch: every User-Agent tried, redirects
+	 * and body included; maxBytes counts the body after gzip is undone.
 	 */
 	struct function fetch( required string feedUrl, struct options = {} ) {
 		var config = duplicate( variables.settings ).append( arguments.options )
 		var deadline = getTickCount() + config.timeoutSeconds * 1000
-		var current = trim( arguments.feedUrl )
+		var address = trim( arguments.feedUrl )
+		// a 429 for a page or an image says nothing about the site's feeds, so only feed fetches count
+		var pausing = ( config.pauseAfter429 ?: true ) && ( config.parse ?: true )
+		var wait = pausing ? pausedSeconds( address ) : 0
+		if ( wait > 0 ) {
+			return {
+				status : 429, notModified : false, etag : "", lastModified : "", finalUrl : address, permanentUrl : "", contentType : "",
+				retryAfterSeconds : wait, maxAgeSeconds : 0, links : [], challenged : false, paused : true,
+				feed : javacast( "null", "" ), body : javacast( "null", "" )
+			}
+		}
+		var flaky = isStruct( config.retryNotFound ?: "" ) ? config.retryNotFound : {}
+		var delays = len( flaky.pattern ?: "" ) && reFindNoCase( flaky.pattern, address ) ? ( flaky.delaysMs ?: [] ) : []
+		var result = fetchAs( address, config, deadline, arguments.options )
+		for ( var delay in delays ) {
+			if ( result.status != 404 ) {
+				break
+			}
+			sleep( min( delay, remainingMs( deadline ) ) )
+			result = fetchAs( address, config, deadline, arguments.options )
+		}
+		if ( pausing ) {
+			noteRateLimit( address, result )
+		}
+		return result
+	}
+
+	/** One fetch, as the User-Agent the host last accepted, then as the others if it's refused. */
+	private struct function fetchAs( required string address, required struct config, required numeric deadline, required struct options ) {
+		var host = hostOf( arguments.address )
+		var agents = [ static.HOST_AGENTS.getOrDefault( host, arguments.config.userAgent ) ]
+		for ( var agent in [ arguments.config.userAgent ].append( arguments.config.fallbackUserAgents ?: [], true ) ) {
+			if ( !agents.contains( agent ) ) {
+				agents.append( agent )
+			}
+		}
+		var result = {}
+		for ( var agent in agents ) {
+			result = fetchOnce( arguments.address, duplicate( arguments.config ).append( { userAgent: agent } ), arguments.deadline, arguments.options )
+			// a bot check refuses every User-Agent alike
+			if ( result.challenged ) {
+				break
+			}
+			if ( !static.REFUSED.contains( result.status ) ) {
+				if ( len( host ) && agent != arguments.config.userAgent ) {
+					static.HOST_AGENTS.put( host, agent )
+				} else if ( len( host ) ) {
+					static.HOST_AGENTS.remove( host )
+				}
+				break
+			}
+		}
+		return result
+	}
+
+	private struct function fetchOnce( required string address, required struct config, required numeric deadline, required struct options ) {
+		var config = arguments.config
+		var deadline = arguments.deadline
+		var current = arguments.address
 		var permanentUrl = ""
 		var onlyPermanent = true
 		for ( var hop = 0; hop <= config.maxRedirects; hop++ ) {
@@ -70,6 +157,8 @@ class {
 					retryAfterSeconds : retryAfter( connection.getHeaderField( "Retry-After" ) ?: "" ),
 					maxAgeSeconds : maxAge( connection.getHeaderField( "Cache-Control" ) ?: "", connection.getHeaderField( "Expires" ) ?: "" ),
 					links        : linksOf( connection, current ),
+					challenged   : isChallenge( connection, status ),
+					paused       : false,
 					feed         : javacast( "null", "" ),
 					body         : javacast( "null", "" )
 				}
@@ -85,6 +174,121 @@ class {
 			}
 		}
 		throw( type = "Feeds.FetchError.TooManyRedirects", message = "More than #config.maxRedirects# redirects" )
+	}
+
+	/** Whether a refusal is a bot check: Cloudflare's own header, or the page's markers. */
+	private boolean function isChallenge( required connection, required numeric status ) {
+		if ( !static.CHECKED.contains( arguments.status ) ) {
+			return false
+		}
+		if ( lcase( trim( arguments.connection.getHeaderField( "cf-mitigated" ) ?: "" ) ) == "challenge" ) {
+			return true
+		}
+		try {
+			var stream = arguments.connection.getErrorStream()
+			if ( isNull( stream ) ) {
+				return false
+			}
+			if ( lcase( arguments.connection.getContentEncoding() ?: "" ) == "gzip" ) {
+				stream = createObject( "java", "java.util.zip.GZIPInputStream" ).init( stream )
+			}
+			var start = createObject( "java", "java.lang.String" ).init( stream.readNBytes( static.CHECK_BYTES ), "UTF-8" )
+			stream.close()
+			return reFindNoCase( static.CHALLENGE, start ) > 0
+		} catch ( any e ) {
+			return false
+		}
+	}
+
+	/**
+	 * After a feed fetch: a 429 leaves the site alone for a while, both the site
+	 * asked and the one a redirect ended at; a 200 or 304 means it's through
+	 * again, so the next 429 starts back at PAUSE_SECONDS.
+	 */
+	private void function noteRateLimit( required string address, required struct result ) {
+		var sites = []
+		for ( var site in [ siteOf( arguments.address ), siteOf( arguments.result.finalUrl ) ] ) {
+			if ( len( site ) && !sites.contains( site ) ) {
+				sites.append( site )
+			}
+		}
+		for ( var site in sites ) {
+			if ( arguments.result.status == 429 ) {
+				var refused = static.REFUSALS.getOrDefault( site, 0 ) + 1
+				var seconds = arguments.result.retryAfterSeconds > 0
+					? min( arguments.result.retryAfterSeconds, static.MAX_RETRY_AFTER )
+					: min( static.PAUSE_SECONDS * ( 2 ^ ( refused - 1 ) ), static.MAX_PAUSE_SECONDS )
+				static.REFUSALS.put( site, refused )
+				static.PAUSED.put( site, getTickCount() + seconds * 1000 )
+			} else if ( arguments.result.status == 200 || arguments.result.status == 304 ) {
+				static.REFUSALS.remove( site )
+			}
+		}
+	}
+
+	/** How many seconds the site at this address is still being left alone after a 429; 0 when it may be asked now. */
+	numeric function pausedSeconds( required string address ) {
+		var site = siteOf( arguments.address )
+		var until = static.PAUSED.getOrDefault( site, 0 )
+		if ( until == 0 ) {
+			return 0
+		}
+		if ( until <= getTickCount() ) {
+			static.PAUSED.remove( site )
+			return 0
+		}
+		return ceiling( ( until - getTickCount() ) / 1000 )
+	}
+
+	/** The sites being left alone after a 429, soonest back first: [ { site, seconds, refusals } ]. */
+	array function pausedSites() {
+		var paused = []
+		for ( var site in static.PAUSED.keySet().toArray() ) {
+			var seconds = pausedSeconds( "http://" & site & "/" )
+			if ( seconds > 0 ) {
+				paused.append( { site: site, seconds: seconds, refusals: static.REFUSALS.getOrDefault( site, 0 ) } )
+			}
+		}
+		paused.sort( ( a, b ) => sgn( a.seconds - b.seconds ) )
+		return paused
+	}
+
+	/** Ends a site's pause now, keeping count of its 429s in a row: the next one still waits longer. */
+	void function endPause( required string address ) {
+		static.PAUSED.remove( siteOf( arguments.address ) )
+	}
+
+	/** Forgets the pauses and the User-Agents hosts accepted; one site's when an address is given. */
+	void function forget( string address = "" ) {
+		if ( !len( arguments.address ) ) {
+			static.PAUSED.clear()
+			static.REFUSALS.clear()
+			static.HOST_AGENTS.clear()
+			return
+		}
+		static.PAUSED.remove( siteOf( arguments.address ) )
+		static.REFUSALS.remove( siteOf( arguments.address ) )
+		static.HOST_AGENTS.remove( hostOf( arguments.address ) )
+	}
+
+	/** The site an address belongs to, for limits a site applies across its subdomains: x.tumblr.com is tumblr.com, news.bbc.co.uk is bbc.co.uk. */
+	string function siteOf( required string address ) {
+		var host = hostOf( arguments.address )
+		if ( reFind( "^[0-9.]+$", host ) || find( ":", host ) ) {
+			return host
+		}
+		var labels = listToArray( host, "." )
+		var count = labels.len()
+		var keep = count > 2 && len( labels[ count ] ) == 2 && static.REGISTRY_LABELS.contains( labels[ count - 1 ] ) ? 3 : 2
+		return count > keep ? labels.slice( count - keep + 1, keep ).toList( "." ) : labels.toList( "." )
+	}
+
+	private string function hostOf( required string address ) {
+		try {
+			return lcase( createObject( "java", "java.net.URI" ).init( trim( arguments.address ) ).getHost() ?: "" )
+		} catch ( any e ) {
+			return ""
+		}
 	}
 
 	/**
